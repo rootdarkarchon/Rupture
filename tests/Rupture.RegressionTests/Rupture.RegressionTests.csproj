@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>Rupture.RegressionTests</AssemblyName>
+  </PropertyGroup>
+
+	<ItemGroup>
+    <None Include="Fixtures/FikaProtocol4.json" CopyToOutputDirectory="PreserveNewest" />
+		<Reference Include="Newtonsoft.Json">
+			<HintPath>$(GameManagedPath)\Newtonsoft.Json.dll</HintPath>
+			<Private>True</Private>
+		</Reference>
+		<Reference Include="UnityEngine">
+			<HintPath>$(GameManagedPath)\UnityEngine.dll</HintPath>
+			<Private>True</Private>
+		</Reference>
+		<Reference Include="UnityEngine.CoreModule">
+			<HintPath>$(GameManagedPath)\UnityEngine.CoreModule.dll</HintPath>
+			<Private>True</Private>
+		</Reference>
+		<Reference Include="UnityEngine.PhysicsModule"><HintPath>$(GameManagedPath)\UnityEngine.PhysicsModule.dll</HintPath><Private>True</Private></Reference>
+	</ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="Assembly-CSharp"><HintPath>$(GameManagedPath)\Assembly-CSharp.dll</HintPath><Private>True</Private></Reference>
+    <Reference Include="Fika.Core"><HintPath>$(FikaPluginPath)\Fika.Core.dll</HintPath><Private>True</Private></Reference>
+    <Reference Include="Mono.Cecil"><HintPath>$(BepInExCorePath)\Mono.Cecil.dll</HintPath><Private>True</Private></Reference>
+    <Reference Include="BepInEx"><HintPath>$(BepInExCorePath)\BepInEx.dll</HintPath><Private>True</Private></Reference>
+    <Reference Include="0Harmony"><HintPath>$(BepInExCorePath)\0Harmony.dll</HintPath><Private>True</Private></Reference>
+    <Reference Include="Comfort"><HintPath>$(GameManagedPath)\Comfort.dll</HintPath><Private>True</Private></Reference>
+    <Reference Include="spt-reflection"><HintPath>$(SptPluginPath)\spt-reflection.dll</HintPath><Private>True</Private></Reference>
+  </ItemGroup>
+
+  <Target Name="BuildRupture" BeforeTargets="Build" Condition="'$(SkipRuptureBuild)' != 'true'">
+    <MSBuild Projects="..\..\src\Rupture.Fika\Rupture.Fika.csproj"
+             Targets="Build"
+             Properties="Configuration=$(Configuration);SptInstallPath=$(SptInstallPath);FikaPluginPath=$(FikaPluginPath)" />
+  </Target>
+</Project>

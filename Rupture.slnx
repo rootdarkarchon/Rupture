@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Rupture/Rupture.csproj" />
+    <Project Path="src/Rupture.Fika/Rupture.Fika.csproj" />
+    <Project Path="src/Rupture.PhysXBackend/Rupture.PhysXBackend.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Rupture.ClothingTests/Rupture.ClothingTests.csproj" />
+    <Project Path="tests/Rupture.RegressionTests/Rupture.RegressionTests.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,73 @@
+{
+  "passed": true,
+  "checks": 859368,
+  "samples": [
+    {
+      "wounds": 1,
+      "initializationMs": 81.8361,
+      "meanFrameCpuMs": 0.0020708333333333308,
+      "p99FrameCpuMs": 0.0436,
+      "gpuReadbackWaitMs": 1.2289,
+      "allocatedBytes": 0,
+      "textureBytes": 196608
+    },
+    {
+      "wounds": 8,
+      "initializationMs": 509.9646,
+      "meanFrameCpuMs": 0.022536666666666667,
+      "p99FrameCpuMs": 0.1603,
+      "gpuReadbackWaitMs": 3.6276,
+      "allocatedBytes": 0,
+      "textureBytes": 1572864
+    },
+    {
+      "wounds": 24,
+      "initializationMs": 1506.9259000000002,
+      "meanFrameCpuMs": 0.04506499999999998,
+      "p99FrameCpuMs": 0.9912000000000001,
+      "gpuReadbackWaitMs": 11.365400000000001,
+      "allocatedBytes": 0,
+      "textureBytes": 4718592
+    }
+  ],
+  "colorSpace": "Gamma",
+  "limitations": "Synthetic 3969-vertex clothing, three renderers per wound; actual EFT blood texture, projection and compositor. CPU includes real GPU dispatch, matrix upload and composition submission; transport, posing and paint state remain on the GPU. GPU readback wait is synchronization wall time, not isolated GPU frame cost. Shared-wound RGBA agreement within 3 quantization levels and treatment ownership checked. Live garment correspondence and in-raid appearance still require verification.",
+  "nativeCompositorReference": true,
+  "twoPassPainting": true,
+  "gpuResident": true,
+  "builtBundle": true,
+  "destinationRecovery": true,
+  "sharedWoundsMatchImmediate": true,
+  "initialPixels": 39,
+  "pixelsAfter30Seconds": 1483,
+  "downhillCentimetres": 19.6171875,
+  "appearance": {
+    "passed": true,
+    "unchangedStainRetained": true,
+    "commandBufferMatchesImmediate": true,
+    "nativeCoreRed": 49,
+    "maximumSoakRed": 39,
+    "maximumNativeChannelDifference": 1
+  },
+  "gpuField": {
+    "passed": true,
+    "checks": 2383561,
+    "maximumSaturationError": 2.74181366E-06
+  },
+  "commandComparisonLinear": {
+    "passed": true,
+    "colorSpace": "Linear",
+    "comparison": "native merge vs two-pass composition; 40 steps; maximum 3-byte RGBA rounding error"
+  },
+  "sharedComparisonLinear": {
+    "passed": true,
+    "colorSpace": "Linear",
+    "comparison": "shared wounds, partial uploads and two-pass composition vs dense immediate native merge; 100 steps; maximum 3-byte RGBA rounding error"
+  },
+  "runtimeSourceSha256": "F2EBEE5D5575CF122D606E0698593D6C644E0A24A7F729B9AB899E9FCDDEB456",
+  "fieldSourceSha256": "7DFC24CD9CE315CCAAD762052717E6C9B957B20BA839982A74BB31EF725431CA",
+  "gpuSourceSha256": "8E2483BBB4AB5477A05B78BF52FD9B7908CC0D7AFDB22461878D5D1D656CF86C",
+  "computeSourceSha256": "FD656C0BA3C8F27A5BF6B685FD57A386F442E4916D59BF31C5C8A735963A7BC0",
+  "shaderSourceSha256": "FE529B78C2DCD3A29C7FE9E0C6329B31AFA516D7E104BA43EC92E0EA49C9469A",
+  "bundleSha256": "D2896A4FCCF2DD61BAE494F97298D56575C464D7A81BB96F37EB917E5D6AED0A"
+}

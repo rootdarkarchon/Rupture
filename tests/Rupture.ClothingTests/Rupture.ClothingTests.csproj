@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework></PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="AssetsTools.NET" Version="3.0.0" />
+    <Compile Include="../../src/Rupture/Clothing/ClothingBundleData.cs" Link="ClothingBundleData.cs" />
+    <Compile Include="../../src/Rupture/Clothing/ClothingBundleDecompression.cs" Link="ClothingBundleDecompression.cs" />
+    <Compile Include="../../src/Rupture/Clothing/ClothingBundleWork.cs" Link="ClothingBundleWork.cs" />
+    <Compile Include="../../src/Rupture/Clothing/ClothingBundleRequests.cs" Link="ClothingBundleRequests.cs" />
+  </ItemGroup>
+</Project>

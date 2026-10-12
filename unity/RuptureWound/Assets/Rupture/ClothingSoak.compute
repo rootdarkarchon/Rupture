@@ -1,0 +1,45 @@
+#pragma kernel Skin
+#pragma kernel Transport
+
+struct SkinVertex { float4 rest; float4 bones; float4 weights; };
+StructuredBuffer<SkinVertex> _Skin;
+StructuredBuffer<float4x4> _Bones;
+RWStructuredBuffer<float4> _Posed;
+StructuredBuffer<int> _Offsets, _Neighbours, _Representatives;
+StructuredBuffer<float> _Current;
+RWStructuredBuffer<float> _Next;
+int _Count;
+float4 _GravitySpeed;
+
+[numthreads(64,1,1)]
+void Skin(uint i : SV_DispatchThreadID)
+{
+    if (i >= (uint)_Count) return;
+    SkinVertex v = _Skin[i];
+    float4 p = float4(v.rest.xyz, 1);
+    _Posed[i] = mul(_Bones[(uint)v.bones.x], p) * v.weights.x +
+        mul(_Bones[(uint)v.bones.y], p) * v.weights.y +
+        mul(_Bones[(uint)v.bones.z], p) * v.weights.z +
+        mul(_Bones[(uint)v.bones.w], p) * v.weights.w;
+}
+
+[numthreads(64,1,1)]
+void Transport(uint i : SV_DispatchThreadID)
+{
+    if (i >= (uint)_Count) return;
+    int r = _Representatives[i];
+    float previous = _Current[r], value = previous;
+    for (int edge = _Offsets[r]; value < 1 && edge < _Offsets[r+1]; edge++)
+    {
+        int j = _Neighbours[edge];
+        if (_Current[j] < 0.999) continue;
+        float3 delta = _Posed[r].xyz - _Posed[j].xyz;
+        float distance = length(delta);
+        float slope = distance > 0.0001 ? dot(delta / distance, _GravitySpeed.xyz) : 0;
+        float bias = slope >= 0 ? lerp(0.28, 1, slope) : lerp(0.28, 0.06, -slope);
+        value = max(value, min(1, previous + _GravitySpeed.w * bias / max(0.002, distance)));
+    }
+    // Every vertex reads the preceding tick. Newly saturated neighbours only
+    // supply the following tick; seam duplicates receive the same value.
+    _Next[i] = value;
+}

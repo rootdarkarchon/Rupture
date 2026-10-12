@@ -1,0 +1,5 @@
+{
+  "name": "Rupture.ClothingHarness.Views",
+  "defineConstraints": ["RPT_CLOTHING_HARNESS"],
+  "autoReferenced": false
+}

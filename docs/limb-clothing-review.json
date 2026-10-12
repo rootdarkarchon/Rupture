@@ -1,0 +1,165 @@
+{
+  "schema": 1,
+  "baseline": "Bare upper/lower mannequin; mean of mirrored measurements at each face and offset. Other mesh sizes never determine anatomy.",
+  "excluded": [],
+  "bare": [
+    {
+      "mesh": "Mannequin_body_LOD0",
+      "source": "b6a1830c4dae89869baf2c8a17bbc17958f28478527a3aa7d2f3be3d9da64b93",
+      "leg": false,
+      "level": "Proximal",
+      "gib": false,
+      "reason": "Bare mannequin anatomy.",
+      "evidence": "artifacts/cloth-calibration-review.png; artifacts/cloth-mesh-review-0.png; extracted source b6a1830c4dae89869baf2c8a17bbc17958f28478527a3aa7d2f3be3d9da64b93"
+    },
+    {
+      "mesh": "Mannequin_body_LOD0",
+      "source": "b6a1830c4dae89869baf2c8a17bbc17958f28478527a3aa7d2f3be3d9da64b93",
+      "leg": false,
+      "level": "Proximal",
+      "gib": true,
+      "reason": "Bare mannequin anatomy.",
+      "evidence": "artifacts/cloth-calibration-review.png; artifacts/cloth-mesh-review-0.png; extracted source b6a1830c4dae89869baf2c8a17bbc17958f28478527a3aa7d2f3be3d9da64b93"
+    },
+    {
+      "mesh": "Mannequin_body_LOD0",
+      "source": "b6a1830c4dae89869baf2c8a17bbc17958f28478527a3aa7d2f3be3d9da64b93",
+      "leg": false,
+      "level": "Distal",
+      "gib": false,
+      "reason": "Bare mannequin anatomy.",
+      "evidence": "artifacts/cloth-calibration-review.png; artifacts/cloth-mesh-review-0.png; extracted source b6a1830c4dae89869baf2c8a17bbc17958f28478527a3aa7d2f3be3d9da64b93"
+    },
+    {
+      "mesh": "Mannequin_body_LOD0",
+      "source": "b6a1830c4dae89869baf2c8a17bbc17958f28478527a3aa7d2f3be3d9da64b93",
+      "leg": false,
+      "level": "Distal",
+      "gib": true,
+      "reason": "Bare mannequin anatomy.",
+      "evidence": "artifacts/cloth-calibration-review.png; artifacts/cloth-mesh-review-0.png; extracted source b6a1830c4dae89869baf2c8a17bbc17958f28478527a3aa7d2f3be3d9da64b93"
+    },
+    {
+      "mesh": "Mannequin_legs_LOD0",
+      "source": "5cabb969bdd7dcf8d30163ba5c45b443d87a086b23cdc793334c4d2f02382cac",
+      "leg": true,
+      "level": "Proximal",
+      "gib": false,
+      "reason": "Bare mannequin anatomy.",
+      "evidence": "artifacts/cloth-calibration-review.png; artifacts/cloth-mesh-review-0.png; extracted source 5cabb969bdd7dcf8d30163ba5c45b443d87a086b23cdc793334c4d2f02382cac"
+    },
+    {
+      "mesh": "Mannequin_legs_LOD0",
+      "source": "5cabb969bdd7dcf8d30163ba5c45b443d87a086b23cdc793334c4d2f02382cac",
+      "leg": true,
+      "level": "Proximal",
+      "gib": true,
+      "reason": "Bare mannequin anatomy.",
+      "evidence": "artifacts/cloth-calibration-review.png; artifacts/cloth-mesh-review-0.png; extracted source 5cabb969bdd7dcf8d30163ba5c45b443d87a086b23cdc793334c4d2f02382cac"
+    },
+    {
+      "mesh": "Mannequin_legs_LOD0",
+      "source": "5cabb969bdd7dcf8d30163ba5c45b443d87a086b23cdc793334c4d2f02382cac",
+      "leg": true,
+      "level": "Distal",
+      "gib": false,
+      "reason": "Bare mannequin anatomy.",
+      "evidence": "artifacts/cloth-calibration-review.png; artifacts/cloth-mesh-review-0.png; extracted source 5cabb969bdd7dcf8d30163ba5c45b443d87a086b23cdc793334c4d2f02382cac"
+    },
+    {
+      "mesh": "Mannequin_legs_LOD0",
+      "source": "5cabb969bdd7dcf8d30163ba5c45b443d87a086b23cdc793334c4d2f02382cac",
+      "leg": true,
+      "level": "Distal",
+      "gib": true,
+      "reason": "Bare mannequin anatomy.",
+      "evidence": "artifacts/cloth-calibration-review.png; artifacts/cloth-mesh-review-0.png; extracted source 5cabb969bdd7dcf8d30163ba5c45b443d87a086b23cdc793334c4d2f02382cac"
+    },
+    {
+      "mesh": "Pants_bear_Shorts_LOD0",
+      "source": "880f448b4a63dd53ca15c367b7605057b9cbc406047fd2cc9ac88fcf9fca3a39",
+      "leg": true,
+      "level": "Distal",
+      "gib": false,
+      "reason": "Exposed calf below shorts.",
+      "evidence": "artifacts/cloth-calibration-review.png; artifacts/cloth-mesh-review-0.png; extracted source 880f448b4a63dd53ca15c367b7605057b9cbc406047fd2cc9ac88fcf9fca3a39"
+    },
+    {
+      "mesh": "Pants_bear_Shorts_LOD0",
+      "source": "880f448b4a63dd53ca15c367b7605057b9cbc406047fd2cc9ac88fcf9fca3a39",
+      "leg": true,
+      "level": "Distal",
+      "gib": true,
+      "reason": "Exposed calf below shorts.",
+      "evidence": "artifacts/cloth-calibration-review.png; artifacts/cloth-mesh-review-0.png; extracted source 880f448b4a63dd53ca15c367b7605057b9cbc406047fd2cc9ac88fcf9fca3a39"
+    },
+    {
+      "mesh": "Pants_usec_Shorts_LOD0",
+      "source": "808c533de2feda8f1a9d87a034595a0f01c6d0b780e841493178200cd90d5ee9",
+      "leg": true,
+      "level": "Distal",
+      "gib": false,
+      "reason": "Exposed calf below shorts.",
+      "evidence": "artifacts/cloth-calibration-review.png; artifacts/cloth-mesh-review-0.png; extracted source 808c533de2feda8f1a9d87a034595a0f01c6d0b780e841493178200cd90d5ee9"
+    },
+    {
+      "mesh": "Pants_usec_Shorts_LOD0",
+      "source": "808c533de2feda8f1a9d87a034595a0f01c6d0b780e841493178200cd90d5ee9",
+      "leg": true,
+      "level": "Distal",
+      "gib": true,
+      "reason": "Exposed calf below shorts.",
+      "evidence": "artifacts/cloth-calibration-review.png; artifacts/cloth-mesh-review-0.png; extracted source 808c533de2feda8f1a9d87a034595a0f01c6d0b780e841493178200cd90d5ee9"
+    },
+    {
+      "mesh": "Tshirt_security_TShirtTatu_lod0",
+      "source": "c5da6de6618f090da8cb89fcfef9b5b5085018a104b584c80c844992d041ad94",
+      "leg": false,
+      "level": "Distal",
+      "gib": false,
+      "reason": "Exposed forearm below the short sleeve.",
+      "evidence": "artifacts/cloth-calibration-review.png; artifacts/cloth-mesh-review-0.png; extracted source c5da6de6618f090da8cb89fcfef9b5b5085018a104b584c80c844992d041ad94"
+    },
+    {
+      "mesh": "Tshirt_security_TShirtTatu_lod0",
+      "source": "c5da6de6618f090da8cb89fcfef9b5b5085018a104b584c80c844992d041ad94",
+      "leg": false,
+      "level": "Distal",
+      "gib": true,
+      "reason": "Exposed forearm below the short sleeve.",
+      "evidence": "artifacts/cloth-calibration-review.png; artifacts/cloth-mesh-review-0.png; extracted source c5da6de6618f090da8cb89fcfef9b5b5085018a104b584c80c844992d041ad94"
+    }
+  ],
+  "retainedFlags": [
+    {
+      "mesh": "Mannequin_legs_LOD0",
+      "source": "5cabb969bdd7dcf8d30163ba5c45b443d87a086b23cdc793334c4d2f02382cac",
+      "reason": "Mesh proportions are comparable to normal garments. Small cut diameter alone is not a scale anomaly; mannequin profiles are authoritative.",
+      "evidence": "artifacts/cloth-calibration-review.png"
+    },
+    {
+      "mesh": "Pants_bear_Shorts_LOD0",
+      "source": "880f448b4a63dd53ca15c367b7605057b9cbc406047fd2cc9ac88fcf9fca3a39",
+      "reason": "Mesh proportions are comparable to normal garments. Small cut diameter alone is not a scale anomaly; mannequin profiles are authoritative.",
+      "evidence": "artifacts/cloth-calibration-review.png"
+    },
+    {
+      "mesh": "Pants_usec_Shorts_LOD0",
+      "source": "808c533de2feda8f1a9d87a034595a0f01c6d0b780e841493178200cd90d5ee9",
+      "reason": "Mesh proportions are comparable to normal garments. Small cut diameter alone is not a scale anomaly; mannequin profiles are authoritative.",
+      "evidence": "artifacts/cloth-calibration-review.png"
+    },
+    {
+      "mesh": "Tshirt_security_Ment_tshirt_LOD0",
+      "source": "b7df99e1ac51e2e471b2e7971ec8b1c7353cb06dce236c74218e329972575f80",
+      "reason": "Mesh proportions are comparable to normal garments. Small cut diameter alone is not a scale anomaly; mannequin profiles are authoritative.",
+      "evidence": "artifacts/cloth-calibration-review.png"
+    },
+    {
+      "mesh": "Tshirt_security_TShirtTatu_lod0",
+      "source": "c5da6de6618f090da8cb89fcfef9b5b5085018a104b584c80c844992d041ad94",
+      "reason": "Mesh proportions are comparable to normal garments. Small cut diameter alone is not a scale anomaly; mannequin profiles are authoritative.",
+      "evidence": "artifacts/cloth-calibration-review.png"
+    }
+  ]
+}

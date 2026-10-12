@@ -1,0 +1,23 @@
+<Project>
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Deterministic>True</Deterministic>
+    <DefaultItemExcludes>$(DefaultItemExcludes);$(MSBuildProjectDirectory)\obj\**;$(MSBuildProjectDirectory)\bin\**;$(MSBuildThisFileDirectory)artifacts\**</DefaultItemExcludes>
+
+    <SptInstallPath Condition="'$(SptInstallPath)' == '' and '$(SPT_ROOT)' != ''">$(SPT_ROOT)</SptInstallPath>
+    <SptInstallPath Condition="'$(SptInstallPath)' == '' and Exists('E:\Games\Tarkov-SPT\EscapeFromTarkov.exe')">E:\Games\Tarkov-SPT</SptInstallPath>
+    <GameManagedPath>$(SptInstallPath)\EscapeFromTarkov_Data\Managed</GameManagedPath>
+    <BepInExCorePath>$(SptInstallPath)\BepInEx\core</BepInExCorePath>
+    <FikaPluginPath Condition="'$(FikaPluginPath)' == ''">$(SptInstallPath)\BepInEx\plugins\Fika</FikaPluginPath>
+    <SptPluginPath>$(SptInstallPath)\BepInEx\plugins\spt</SptPluginPath>
+  </PropertyGroup>
+
+  <Target Name="ValidateSptInstallPath" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="'$(SptInstallPath)' == ''"
+           Text="Set SPT_ROOT or pass -p:SptInstallPath=&lt;path-to-SPT&gt;." />
+    <Error Condition="!Exists('$(SptInstallPath)\EscapeFromTarkov.exe')"
+           Text="SptInstallPath does not point to an SPT installation: $(SptInstallPath)" />
+  </Target>
+</Project>

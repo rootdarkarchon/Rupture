@@ -1,0 +1,19 @@
+.refs/
+.tools/
+.vs/
+original/
+artifacts/
+**/BepInEx/plugins/rupture/cache/
+**/bin/
+**/obj/
+*.user
+*.suo
+
+**/__pycache__/
+
+# Unity editor caches; keep authored templates and assets.
+/unity/**/Library/
+/unity/**/Temp/
+/unity/**/Logs/
+/unity/**/UserSettings/
+/unity/**/Obj/

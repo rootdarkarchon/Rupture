@@ -1,0 +1,15 @@
+{
+    "bundle": "rupture-wound.bundle",
+    "sha256": "D2896A4FCCF2DD61BAE494F97298D56575C464D7A81BB96F37EB917E5D6AED0A",
+    "unityVersion": "2022.3.43f1",
+    "verifiedUtc": "2026-09-18T11:41:26.0801819Z",
+    "shaders": [
+        "Rupture/HeadWoundInterior",
+        "Rupture/PulsatingBloodStream",
+        "Rupture/LimbSeverSurface",
+        "Rupture/ClothingSoak"
+    ],
+    "computeShaders": [
+        "ClothingSoak"
+    ]
+}

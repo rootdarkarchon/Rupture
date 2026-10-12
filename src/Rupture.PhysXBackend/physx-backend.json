@@ -1,0 +1,12 @@
+{
+  "name": "Rupture External PhysX Backend",
+  "managedAssembly": "Rupture.PhysXBackend.dll",
+  "nativeBridge": "rpt_physx_bridge.dll",
+  "abiVersion": 10,
+  "physxVersion": "4.1.2",
+  "physxCommit": "a2c0428acab643e60618c681b501e86f7fd558cc",
+  "architecture": "win-x64",
+  "nativeRuntime": "static-crt",
+  "optional": true,
+  "cacheDirectory": "cache"
+}

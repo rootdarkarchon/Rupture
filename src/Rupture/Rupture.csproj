@@ -1,0 +1,94 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Rupture</AssemblyName>
+    <RootNamespace>Rupture</RootNamespace>
+    <Version>1.2.1</Version>
+    <AssemblyVersion>1.2.1.0</AssemblyVersion>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <CheckForOverflowUnderflow>False</CheckForOverflowUnderflow>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="AnimationSystem.Types"><HintPath>$(GameManagedPath)\AnimationSystem.Types.dll</HintPath><Private>False</Private></Reference>
+    <Reference Include="UnityEngine.AIModule"><HintPath>$(GameManagedPath)\UnityEngine.AIModule.dll</HintPath><Private>False</Private></Reference>
+    <Reference Include="UnityEngine.AudioModule">
+      <HintPath>$(GameManagedPath)\UnityEngine.AudioModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <PackageReference Include="AssetsTools.NET" Version="3.0.0" />
+    <Compile Include="..\..\unity\RuptureWound\Assets\Rupture\BloodStreams\ClothingSoakField.cs" Link="Dismemberment\Classes\BloodStreams\ClothingSoakField.cs" />
+    <Compile Include="..\..\unity\RuptureWound\Assets\Rupture\BloodStreams\ClothingSoakGpu.cs" Link="Dismemberment\Classes\BloodStreams\ClothingSoakGpu.cs" />
+    <Reference Include="UnityEngine">
+      <HintPath>$(GameManagedPath)\UnityEngine.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="BepInEx">
+      <HintPath>$(BepInExCorePath)\BepInEx.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.AssetBundleModule">
+      <HintPath>$(GameManagedPath)\UnityEngine.AssetBundleModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(GameManagedPath)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Unity.Collections">
+      <HintPath>$(GameManagedPath)\Unity.Collections.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(GameManagedPath)\Assembly-CSharp.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>$(GameManagedPath)\UnityEngine.PhysicsModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="spt-reflection">
+      <HintPath>$(SptPluginPath)\spt-reflection.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="bsg.console.core">
+      <HintPath>$(GameManagedPath)\bsg.console.core.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Comfort">
+      <HintPath>$(GameManagedPath)\Comfort.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>$(GameManagedPath)\Newtonsoft.Json.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(BepInExCorePath)\0Harmony.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.ParticleSystemModule">
+      <HintPath>$(GameManagedPath)\UnityEngine.ParticleSystemModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+
+
+  <ItemGroup>
+    <Compile Include="..\..\unity\RuptureWound\Assets\Rupture\BloodStreams\BloodParcelRenderer.cs" Link="Dismemberment\Classes\BloodStreams\BloodParcelRenderer.cs" />
+    <Compile Include="..\..\unity\RuptureWound\Assets\Rupture\HeadWounds\ProceduralHeadWoundUnion.cs" Link="Rupture\Dismemberment\Classes\HeadWounds\ProceduralHeadWoundUnion.cs" />
+    <Compile Include="..\..\unity\RuptureWound\Assets\Rupture\HeadWounds\ProceduralHeadWoundGeometry.cs"
+             Link="Rupture\Dismemberment\Classes\HeadWounds\ProceduralHeadWoundGeometry.cs" />
+    <Compile Include="..\..\unity\RuptureWound\Assets\Rupture\Limbs\LimbSeverLevel.cs"
+             Link="Rupture\Dismemberment\Classes\Limbs\LimbSeverLevel.cs" />
+    <Compile Include="..\..\unity\RuptureWound\Assets\Rupture\Limbs\ProceduralLimbWoundGeometry.cs"
+             Link="Rupture\Dismemberment\Classes\Limbs\ProceduralLimbWoundGeometry.cs" />
+    <Compile Include="..\..\unity\RuptureWound\Assets\Rupture\Limbs\ProceduralLimbClothGeometry.cs"
+             Link="Rupture\Dismemberment\Classes\Limbs\ProceduralLimbClothGeometry.cs" />
+    <Compile Include="..\..\unity\RuptureWound\Assets\Rupture\Limbs\LimbClothingProfiles*.cs"
+             Link="Rupture\Dismemberment\Classes\Limbs\%(Filename)%(Extension)" />
+  </ItemGroup>
+
+</Project>

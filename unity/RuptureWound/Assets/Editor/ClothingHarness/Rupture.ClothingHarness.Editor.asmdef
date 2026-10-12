@@ -1,0 +1,9 @@
+{
+  "name": "Rupture.ClothingHarness.Editor",
+  "defineConstraints": ["RPT_CLOTHING_HARNESS"],
+  "references": ["Rupture.ClothingHarness.Views"],
+  "includePlatforms": ["Editor"],
+  "overrideReferences": true,
+  "precompiledReferences": ["Newtonsoft.Json.dll"],
+  "autoReferenced": false
+}
