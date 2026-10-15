@@ -13,7 +13,7 @@ Run from the repository root with PowerShell 7:
 ```powershell
 py -m pip install --target artifacts/clothing-python UnityPy==1.25.3
 ./scripts/Setup-ClothingHarness.ps1 -ExtractFixtures `
-    -SptInstallPath D:\Tarkov-SPT `
+    -SptInstallPath <absolute-SPT-4.1-path> `
     -PythonDependencyPath (Resolve-Path artifacts/clothing-python)
 ```
 
@@ -149,7 +149,7 @@ Strongly limb-owned disconnected clothing details follow the detached limb even
 outside the fitted capsule; torso-owned details stay on the retained body.
 Collapsed retained faces are removed before boundary-owner counting.
 
-After this update, run `./scripts/Setup-ClothingHarness.ps1` once to install the
+After this update, run `./scripts/Setup-ClothingHarness.ps1 -SptInstallPath <path>` once to install the
 new shared batch source and UI. Existing scene clones are discarded on assembly
 reload; save any previews first. Subsequent algorithm edits can use **Sync
 production sources** as usual. Fixtures and previous on-disk reports are preserved.

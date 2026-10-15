@@ -31,6 +31,7 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 	private readonly SimulationActivity _activity = new SimulationActivity();
 	public bool NeedsSimulation => _activity.NeedsStep;
 	private readonly Dictionary<int, ulong> _bodyShapesByCollider = new Dictionary<int, ulong>();
+	private readonly HashSet<string> _reportedSkippedBodyShapes = new HashSet<string>(StringComparer.Ordinal);
 	private readonly Dictionary<int, EnvironmentActor> _environmentByCollider = new Dictionary<int, EnvironmentActor>();
 	private readonly List<EnvironmentActor> _environmentActors = new List<EnvironmentActor>();
 	private readonly List<EnvironmentActor> _movableEnvironmentActors = new List<EnvironmentActor>();
@@ -375,6 +376,9 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 		{
 			ActorSnapshot snapshot = ActorSnapshot.CaptureBody(nativeBody, colliders, ownerGroup, kinematic,
 				_options.DeadbodyLayer, _options.EnvironmentMask, collisionProfile);
+			foreach (string skipped in snapshot.SkippedUnsimulatedShapes)
+				if (_reportedSkippedBodyShapes.Add(skipped))
+					Log(ExternalLogLevel.Info, $"External body {nativeBody.name} omits MeshCollider {skipped}: Unity simulates no native shape for it.");
 			Vector3 centerOfMass = nativeBody.centerOfMass;
 			ExternalBody created = null;
 			InvokeOwner(() =>
@@ -395,6 +399,12 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 		catch (Exception exception)
 		{
 			failure = exception.GetType().Name + ": " + exception.Message;
+			if (!(exception is InvalidOperationException) && !(exception is NotSupportedException))
+			{
+				string trace = exception.StackTrace ?? string.Empty;
+				int end = trace.IndexOf('\n');
+				failure += " at " + (end < 0 ? trace : trace.Substring(0, end)).Trim();
+			}
 			return false;
 		}
 	}

@@ -20,7 +20,7 @@ $plugin = Join-Path $root "BepInEx/plugins/rupture"
 $manifest = Get-Content -LiteralPath (Join-Path $plugin "physx-backend.json") -Raw | ConvertFrom-Json
 if ($manifest.abiVersion -ne 10 -or $manifest.nativeBridge -cne "rpt_physx_bridge.dll" -or $manifest.managedAssembly -cne "Rupture.PhysXBackend.dll") { throw "Backend identity/ABI mismatch." }
 $identity = [Reflection.AssemblyName]::GetAssemblyName((Join-Path $plugin "Rupture.dll"))
-if ($identity.Name -cne "Rupture" -or $identity.Version.ToString() -ne "1.2.1.0") { throw "Main assembly identity mismatch." }
+if ($identity.Name -cne "Rupture" -or $identity.Version.ToString() -ne "1.2.2.0") { throw "Main assembly identity mismatch." }
 $fikaIdentity = [Reflection.AssemblyName]::GetAssemblyName((Join-Path $plugin "Rupture.Fika.dll"))
 if ($fikaIdentity.Name -cne "Rupture.Fika" -or $fikaIdentity.Version -ne $identity.Version) { throw "Optional Fika bridge identity/version mismatch." }
 $backendIdentity = [Reflection.AssemblyName]::GetAssemblyName((Join-Path $plugin "Rupture.PhysXBackend.dll"))

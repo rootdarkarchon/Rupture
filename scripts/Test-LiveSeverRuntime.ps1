@@ -81,9 +81,11 @@ $constants = foreach ($name in @('LocalGibMaximumDepenetrationSpeed','LocalGibMa
     if (!$match.Success) { throw "Missing production gib limit: $name" }
     $match.Value
 }
+$gibImpactMembers = foreach ($member in @('private static void ConfigureLocalGibQueryCollider(',
+    'private static bool ApplyRadialImpulse(IShadowBodyProxy')) { Get-ProductionMember $world $member }
 [IO.File]::WriteAllText((Join-Path $project 'Assets/Living/ShadowRagdollWorld.Shared.cs'),
     'using UnityEngine; namespace Rupture.Ragdolls.Classes { internal static partial class ShadowRagdollWorld {' +
-    ($constants -join "`n") + "`n" + $parking + '} }')
+    ($constants -join "`n") + "`n" + $parking + "`n" + ($gibImpactMembers -join "`n") + '} }')
 $log = Join-Path $repo 'artifacts/live-sever-runtime-unity.log'
 $started = [DateTime]::UtcNow
 $process = Start-Process -FilePath $UnityEditorPath -ArgumentList @('-batchmode','-nographics',

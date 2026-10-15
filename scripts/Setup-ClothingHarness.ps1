@@ -1,6 +1,6 @@
 param(
     [string]$ProjectPath,
-    [string]$SptInstallPath = 'D:\Tarkov-SPT',
+    [Parameter(Mandatory=$true)][string]$SptInstallPath,
     [switch]$ExtractFixtures,
     [switch]$AllLods,
     [string]$Python = 'py',

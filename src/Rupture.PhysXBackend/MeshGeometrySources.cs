@@ -173,7 +173,7 @@ internal sealed class UnityPhysXMeshGeometrySource : IMeshGeometrySource
 		{
 			RefreshShapeMap(syncTransforms: true);
 			if (!_shapesByCollider.TryGetValue(colliderId, out shapes) || shapes.Count == 0)
-				throw new UnityPhysXShapeUnavailableException(collider, "Unity has no active native PhysX shape for this MeshCollider");
+				throw new UnityPhysXShapeUnavailableException(collider, "Unity has no active native PhysX shape for this MeshCollider", noNativeShape: true);
 		}
 
 		foreach (IntPtr shape in shapes)
@@ -582,6 +582,12 @@ internal sealed class UnityPhysXMeshGeometrySource : IMeshGeometrySource
 
 internal sealed class UnityPhysXShapeUnavailableException : InvalidOperationException
 {
-	internal UnityPhysXShapeUnavailableException(Collider collider, string reason)
-		: base($"Unity PhysX shape extraction is unavailable for {collider?.GetType().Name ?? "Collider"} {collider?.name ?? "<destroyed>"}: {reason}.") { }
+	internal UnityPhysXShapeUnavailableException(Collider collider, string reason, bool noNativeShape = false)
+		: base($"Unity PhysX shape extraction is unavailable for {collider?.GetType().Name ?? "Collider"} {collider?.name ?? "<destroyed>"}: {reason}.")
+	{
+		NoNativeShape = noNativeShape;
+	}
+
+	// Unity itself simulates nothing for this collider (disabled, inactive, or rejected).
+	internal bool NoNativeShape { get; }
 }

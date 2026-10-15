@@ -25,7 +25,7 @@ The implemented [corpse-control API V1](CORPSE-CONTROL-API.md) permits authority
 
 ## Rig construction and ownership transfer
 
-[ShadowRagdollWorld](../src/Rupture/Ragdolls/Classes/ShadowRagdollWorld.cs) defers capture until a frame after native `EFT.Interactive.CorpseRagdoll.Start`. It snapshots actual bodies, collision state, support-list registration counts, joints, poses and velocities. Weapon attachment and pending sever-collider removal must finish consistently with this capture.
+[ShadowRagdollWorld](../src/Rupture/Ragdolls/Classes/ShadowRagdollWorld.cs) defers capture until a frame after native `EFT.Interactive.CorpseRagdoll.Start`. It snapshots actual bodies, collision state, support-list registration counts, joints, poses and velocities. Weapon attachment and pending sever-collider removal must finish consistently with this capture. Body capture includes disabled colliders as disabled shapes, except MeshColliders that Unity itself simulates no native shape for (no mesh, inactive equipment LODs, rejected shapes): those carry no native contact and are omitted, logged once per collider name, rather than rejecting the rig. A body left with no simulated shape still fails. A build scheduled by a native restart whose ragdoll stopped again before capture is dropped without a failure warning.
 
 Construction creates external actors/joints and validates required environment before changing native ownership. Weapons use an independent dynamic body with rounded-box geometry; there is no corpse-hand joint. Native-to-shadow dictionaries provide direct force routing through [IShadowBodyProxy / ExternalShadowBodyProxy](../src/Rupture/Ragdolls/Classes/ShadowBodyProxy.cs).
 

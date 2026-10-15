@@ -21,7 +21,7 @@ namespace Rupture.Impacts;
 internal static class FikaImpactNetwork
 {
     internal const int Protocol = 14;
-    internal const string Version = "1.2.1";
+    internal const string Version = "1.2.2";
     private sealed class PeerState { internal NetPeer Peer; internal string Session; internal float Deadline; internal uint ConfigurationRevision; }
     internal enum Reconciliation { Applied, Stale, WaitingIdentity, WaitingDeathData, Rejected }
     private sealed class PendingState

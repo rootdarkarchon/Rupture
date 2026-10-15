@@ -1820,7 +1820,7 @@ internal static partial class ShadowRagdollWorld
 				}
 			}
 		}
-		return false;
+		return TryApplyLivingGibPointImpulse(hitCollider, impulse, worldPoint, out bodyName);
 	}
 
 	internal static bool ForceSettle(Corpse corpse)
@@ -2340,6 +2340,9 @@ internal static partial class ShadowRagdollWorld
 				continue;
 			}
 			PendingBuilds.RemoveAt(index);
+			// Every native restart re-schedules; a ragdoll that stopped again before
+			// this frame has nothing to hand off and is not a construction failure.
+			if (pending.Ragdoll._isPhysicsDone) continue;
 			if (!TryBuild(pending.Ragdoll, out string failure))
 			{
 				_buildFailures++;
@@ -2981,6 +2984,9 @@ internal static partial class ShadowRagdollWorld
 		catch (Exception exception)
 		{
 			failure = exception.GetType().Name + ": " + exception.Message;
+			// Expected rejections carry their own explanation; programming faults need a location.
+			if (!(exception is InvalidOperationException) && !(exception is NotSupportedException))
+				failure += " at " + DescribeThrowSite(exception);
 			if (rig.Committed)
 			{
 				AbortToNative(rig, failure, log: false);
@@ -2991,6 +2997,14 @@ internal static partial class ShadowRagdollWorld
 			}
 			return false;
 		}
+	}
+
+	private static string DescribeThrowSite(Exception exception)
+	{
+		string trace = exception.StackTrace;
+		if (string.IsNullOrEmpty(trace)) return "unknown";
+		int end = trace.IndexOf('\n');
+		return (end < 0 ? trace : trace.Substring(0, end)).Trim();
 	}
 
 	private static bool EnsureScene(out string failure)

@@ -2,8 +2,8 @@
   <PropertyGroup>
     <AssemblyName>Rupture.Fika</AssemblyName>
     <TargetFramework>netstandard2.1</TargetFramework>
-    <Version>1.2.1</Version>
-    <AssemblyVersion>1.2.1.0</AssemblyVersion>
+    <Version>1.2.2</Version>
+    <AssemblyVersion>1.2.2.0</AssemblyVersion>
   </PropertyGroup>
   <ItemGroup><ProjectReference Include="../Rupture/Rupture.csproj" /></ItemGroup>
   <ItemGroup>

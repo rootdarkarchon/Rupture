@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param([string]$UnityEditorPath = 'C:\Program Files\Unity 2022.3.43f1\Editor\Unity.exe',
-    [string]$SptInstallPath = 'D:\Tarkov-SPT', [string]$FixtureDirectory)
+    [Parameter(Mandatory=$true)][string]$SptInstallPath, [string]$FixtureDirectory)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $project = Join-Path $repo 'artifacts/FractureRuntimeUnity'

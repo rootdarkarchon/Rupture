@@ -47,9 +47,11 @@ internal static partial class HeadWoundSystem
 		internal HeadWoundData Packet;
 		internal CorpseWounds State;
 		internal HeadBuild Build;
+		internal int StaleRecaptures;
 		internal float QueuedAt;
 		internal float ExpiresAt;
 	}
+	private const int MaximumStaleRecaptures = 2;
 
 	private enum ApplyResult
 	{
@@ -451,7 +453,14 @@ internal static partial class HeadWoundSystem
 		SkinnedMeshRenderer sourceRenderer = candidate.Renderer;
 		if (sourceRenderer == null || sourceRenderer.sharedMesh != candidate.NativeMesh || candidate.Bones.Any(bone => bone == null) ||
 			!sourceRenderer.bones.SequenceEqual(candidate.Bones))
-		{ failure = "captured head renderer or skeleton changed before adoption"; return ApplyResult.Rejected; }
+		{
+			failure = "captured head renderer or skeleton changed before adoption";
+			// Corpse handoff or equipment changes can swap the skin while the worker
+			// runs. Rebuild from the current renderer within the same wound lifetime.
+			if (work.StaleRecaptures++ >= MaximumStaleRecaptures) return ApplyResult.Rejected;
+			ReleaseBuild(work);
+			return ApplyResult.Waiting;
+		}
 		headRenderers = build.HeadRenderers;
 		Transform[] sourceBones = candidate.Bones;
 		Vector3 entry = job.Entry, exit = job.Exit;

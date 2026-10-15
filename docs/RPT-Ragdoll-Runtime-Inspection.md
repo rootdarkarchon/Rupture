@@ -4,7 +4,7 @@ Use this checklist with a known build and matched EFT/SPT/Fika installation. It 
 
 ## Establish the run
 
-Record package identity, game/Fika versions, peer roles, enabled mods, configuration and map. Current source is Rupture 1.2.1, impact protocol 14, native physics ABI 10 and sixteen synchronized settings. The canonical package has nine runtime/license files; the bundle has four shaders and one compute shader. Verify identical Rupture builds on host/headless and all clients. See [development setup](DEVELOPMENT.md) for build inputs.
+Record package identity, game/Fika versions, peer roles, enabled mods, configuration and map. Current source is Rupture 1.2.2, impact protocol 14, native physics ABI 10 and sixteen synchronized settings. The canonical package has nine runtime/license files; the bundle has four shaders and one compute shader. Verify identical Rupture builds on host/headless and all clients. See [development setup](DEVELOPMENT.md) for build inputs.
 
 Enable relevant local diagnostics in `RuptureConfiguration`. Correlate `RPTPhysicsStatus`, `RPTPhysicsBodies`, `RPTPhysicsScene`, `RPTPhysicsSample`, `RPTShadowStatus` and `RPTHeadWoundStatus` with logs and the profiler. Keep overlays, captures and performance logging explicit in measurements; a visible corpse alone does not prove which solver owns it.
 

@@ -102,6 +102,11 @@ internal static class GrenadePhysics
 				appliedBodies += independentBodies;
 			}
 		}
+		// Living-sever gibs are local presentation on every graphical peer and are
+		// not part of any corpse rig, including after their bot has died.
+		int livingGibBodies = ShadowRagdollWorld.ApplyLivingGibRadialImpulse(grenadePosition, radius, force);
+		if (livingGibBodies > 0)
+			RupturePlugin.Log.LogInfo($"RPT living gib explosion impulse: appliedBodies={livingGibBodies}, radius={radius:F2}, force={force:F2}.");
 		if (AffectedCorpses.Count > 0)
 		{
 			double impulseMilliseconds = impulseStarted == 0L ? 0d :

@@ -130,7 +130,7 @@ internal static class ConfigurationTests
             Type helloType = Program.Bridge.GetType("Rupture.Impacts.RuptureHelloPacket", true);
             object hello = Activator.CreateInstance(helloType);
             void Field(string name, object value) => helloType.GetField(name).SetValue(hello, value);
-            Field("Protocol", 14); Field("Version", "1.2.1"); Field("Session", new string('a', 32));
+            Field("Protocol", 14); Field("Version", "1.2.2"); Field("Session", new string('a', 32));
             Field("ConfigurationRevision", 2u); Field("VisualConfiguration", host);
             var writer = new NetDataWriter(); ((INetSerializable)hello).Serialize(writer);
             object received = Activator.CreateInstance(helloType);

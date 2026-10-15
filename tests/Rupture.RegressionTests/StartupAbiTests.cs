@@ -96,6 +96,6 @@ internal static class StartupAbiTests
             configType.Properties.All(p => p.GetMethod.IsStatic && p.PropertyType.Name.StartsWith("ConfigEntry")) &&
             !rupture.MainModule.GetType("Rupture.RupturePlugin").Properties.Any(p => p.PropertyType.Name.StartsWith("ConfigEntry")),
             "all thirty-one configuration entries belong to the static configuration class");
-        Check(rupture.Name.Version == new Version(1, 2, 1, 0), "SDK-generated assembly version preserves package identity");
+        Check(rupture.Name.Version == new Version(1, 2, 2, 0), "SDK-generated assembly version preserves package identity");
     }
 }

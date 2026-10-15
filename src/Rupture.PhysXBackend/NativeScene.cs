@@ -457,6 +457,7 @@ internal sealed class ActorSnapshot
 	internal bool Movable;
 	internal NativeApi.BodyDesc Body;
 	internal readonly List<ShapeSnapshot> Shapes = new List<ShapeSnapshot>();
+	internal readonly List<string> SkippedUnsimulatedShapes = new List<string>();
 	internal bool UpdateMassPropertiesFromShapes;
 
 	internal static ActorSnapshot CaptureEnvironment(Transform root, IReadOnlyList<Collider> colliders, bool movable, int deadbodyLayer)
@@ -496,7 +497,25 @@ internal sealed class ActorSnapshot
 		uint deadbodyBits = deadbodyLayer >= 0 ? 1u << deadbodyLayer : uint.MaxValue;
 		uint collides = (uint)environmentMask;
 		if (collisionProfile == ExternalCollisionProfile.DeadbodyAndEnvironment) collides |= deadbodyBits;
-		foreach (Collider collider in colliders) snapshot.Shapes.Add(CaptureShape(collider, body.transform, ownerGroup, deadbodyBits, collides));
+		foreach (Collider collider in colliders)
+		{
+			// Equipment can carry MeshColliders that Unity does not simulate on the
+			// body (no mesh, disabled LOD duplicates, rejected non-convex shapes). They
+			// have no native contact either, so omitting them preserves parity instead
+			// of rejecting the whole rig.
+			if (collider is MeshCollider meshCollider && meshCollider.sharedMesh == null)
+			{
+				snapshot.SkippedUnsimulatedShapes.Add(collider.name);
+				continue;
+			}
+			try { snapshot.Shapes.Add(CaptureShape(collider, body.transform, ownerGroup, deadbodyBits, collides)); }
+			catch (UnityPhysXShapeUnavailableException exception) when (exception.NoNativeShape)
+			{
+				snapshot.SkippedUnsimulatedShapes.Add(collider.name);
+			}
+		}
+		if (snapshot.Shapes.Count == 0 && snapshot.SkippedUnsimulatedShapes.Count > 0)
+			throw new InvalidOperationException($"Body {body.name} has no Unity-simulated collider shapes ({string.Join(", ", snapshot.SkippedUnsimulatedShapes)}).");
 		return snapshot;
 	}
 

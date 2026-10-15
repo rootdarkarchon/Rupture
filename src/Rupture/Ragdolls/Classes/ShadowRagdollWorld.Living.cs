@@ -52,8 +52,11 @@ internal static partial class ShadowRagdollWorld
     private sealed class LivingGib
     {
         internal GameObject Root;
+        internal Rigidbody Native;
+        internal Collider[] Colliders;
         internal IExternalBodyCreation Creation;
         internal IExternalPhysicsBody Body;
+        internal IShadowBodyProxy Proxy;
         internal uint Group;
         internal float ExpiresAt;
         internal Vector3 Velocity;
@@ -294,6 +297,10 @@ internal static partial class ShadowRagdollWorld
                 if (status != ExternalBodyCreationStatus.Succeeded)
                 { gib.Completion?.Invoke(false, failure); gib.Completion = null; DestroyLivingGib(gib); LivingGibs.RemoveAt(i); continue; }
                 gib.Body = body; body.Velocity = gib.Velocity;
+                gib.Proxy = new ExternalShadowBodyProxy(body, gib.Native);
+                // Like corpse gibs, keep enabled ballistic query shapes on the parked
+                // shell so bullets and blasts can find the externally simulated body.
+                foreach (Collider collider in gib.Colliders) ConfigureLocalGibQueryCollider(collider);
                 gib.Completion?.Invoke(true, null); gib.Completion = null;
             }
             if (gib.Root == null || Time.realtimeSinceStartup > gib.ExpiresAt) { DestroyLivingGib(gib); LivingGibs.RemoveAt(i); }
@@ -399,6 +406,10 @@ internal static partial class ShadowRagdollWorld
         Vector3 velocity = native.velocity;
         Vector3 position = native.transform.position;
         Quaternion rotation = native.transform.rotation;
+        // The gib is one body; disabled shapes report no attachedRigidbody.
+        var colliders = new List<Collider>();
+        foreach (Collider collider in root.GetComponentsInChildren<Collider>(true))
+            if (!collider.isTrigger) colliders.Add(collider);
         IExternalBodyCreation creation;
         try
         {
@@ -415,7 +426,7 @@ internal static partial class ShadowRagdollWorld
         catch { _externalRuntime.ReleaseEnvironment(group); throw; }
         finally { ParkLocalDetachedEffectShell(root); }
         if (creation == null) { _externalRuntime.ReleaseEnvironment(group); completion?.Invoke(false, failure); return false; }
-        LivingGibs.Add(new LivingGib { Root = root, Creation = creation, Group = group,
+        LivingGibs.Add(new LivingGib { Root = root, Native = native, Colliders = colliders.ToArray(), Creation = creation, Group = group,
             Velocity = Vector3.ClampMagnitude(velocity + Vector3.ClampMagnitude(direction, 1f) * 2f, LocalGibMaximumInitialLaunchSpeed),
             Completion = completion, ExpiresAt = Time.realtimeSinceStartup + 120f });
         return true;
@@ -428,6 +439,46 @@ internal static partial class ShadowRagdollWorld
             LivingGibs[i].Completion = null;
             DestroyLivingGib(LivingGibs[i]); LivingGibs.RemoveAt(i);
         }
+    }
+    // Living gibs stay owned here after their bot dies: the corpse may be far from
+    // where the limb landed, so they are not adopted into the corpse shadow rig.
+    internal static bool TryApplyLivingGibPointImpulse(Collider hitCollider, Vector3 impulse, Vector3 worldPoint, out string bodyName)
+    {
+        bodyName = null;
+        Rigidbody hitBody = hitCollider.attachedRigidbody;
+        foreach (LivingGib gib in LivingGibs)
+        {
+            if (gib.Native == null || gib.Proxy == null || gib.Body?.IsValid != true ||
+                (hitBody != gib.Native && !hitCollider.transform.IsChildOf(gib.Native.transform))) continue;
+            Vector3 center = gib.Proxy.worldCenterOfMass;
+            if (!EnsureLivingGibEnvironment(gib, center, center + Vector3.ClampMagnitude(impulse, 2f))) return false;
+            gib.Proxy.AddForceAtPosition(impulse, worldPoint, ForceMode.Impulse);
+            gib.Proxy.WakeUp();
+            bodyName = gib.Native.name;
+            return true;
+        }
+        return false;
+    }
+    internal static int ApplyLivingGibRadialImpulse(Vector3 origin, float radius, float force)
+    {
+        int affected = 0;
+        foreach (LivingGib gib in LivingGibs)
+        {
+            if (gib.Proxy == null || gib.Body?.IsValid != true) continue;
+            Vector3 center = gib.Proxy.worldCenterOfMass;
+            Vector3 offset = center - origin;
+            if (offset.sqrMagnitude > radius * radius ||
+                !EnsureLivingGibEnvironment(gib, center, center + offset.normalized * 2f)) continue;
+            if (ApplyRadialImpulse(gib.Proxy, origin, radius, force)) { gib.Proxy.WakeUp(); affected++; }
+        }
+        return affected;
+    }
+    private static bool EnsureLivingGibEnvironment(LivingGib gib, Vector3 center, Vector3 sweepEnd)
+    {
+        // Spawn coverage only surrounds the cut point; an impact can move the
+        // limb elsewhere, so refresh this gib's proximity consumer first.
+        return _externalRuntime != null && (_externalRuntime.IsFullPrebake ||
+            _externalRuntime.EnsureEnvironment(gib.Group, center, sweepEnd, out _, out _));
     }
     private static void DestroyLivingGib(LivingGib gib)
     {

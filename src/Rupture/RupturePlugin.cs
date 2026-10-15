@@ -27,7 +27,7 @@ using MainThreadStage = Rupture.Ragdolls.Classes.ShadowRagdollWorld.MainThreadSt
 
 namespace Rupture;
 
-[BepInPlugin("com.rootdarkarchon.rupture", "Rupture", "1.2.1")]
+[BepInPlugin("com.rootdarkarchon.rupture", "Rupture", "1.2.2")]
 [BepInDependency("com.fika.core", BepInDependency.DependencyFlags.SoftDependency)]
 [BepInDependency("com.janky.hollywoodfx", BepInDependency.DependencyFlags.SoftDependency)]
 [DefaultExecutionOrder(32000)]

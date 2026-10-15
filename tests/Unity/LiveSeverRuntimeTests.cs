@@ -174,6 +174,7 @@ namespace Rupture.Ragdolls.Classes
                 LiveSeverRuntimeTests.Check(completions == 0 && LivingGibs.Count == 0 && runtime.Groups.Count == 0,
                     "cancelled cuts cannot receive late gib completion");
                 gib = new GameObject("detached leg"); gib.transform.position = new Vector3(8, 3, 0); gib.AddComponent<Rigidbody>();
+                var gibShape = gib.AddComponent<BoxCollider>();
                 RegisterLivingGib(gib, gib.transform.position, Vector3.up, Array.Empty<ExternalTransientConvexShape>(),
                     (success, failure) => { if (success) completions++; });
                 UpdateLivingFalls();
@@ -185,6 +186,29 @@ namespace Rupture.Ragdolls.Classes
                 PublishLivingPhysics();
                 LiveSeverRuntimeTests.Check(LivingGibs[0].Body.Velocity.y < -7f && gib.transform.position.y < 2.5f,
                     "upward launched gib falls under captured gravity instead of flying continuously");
+                LiveSeverRuntimeTests.Check(gibShape.enabled && !gibShape.isTrigger && gibShape.excludeLayers.value == ~0,
+                    "admitted detached leg exposes a ballistic query shape without Unity contacts");
+                uint gibGroup = LivingGibs[0].Group;
+                runtime.Groups.Remove(gibGroup);
+                float lateral = LivingGibs[0].Body.Velocity.x;
+                LiveSeverRuntimeTests.Check(TryApplyLivingGibPointImpulse(gibShape, Vector3.right * 5f, LivingGibs[0].Body.WorldCenterOfMass, out _),
+                    "bullets hitting a living detached leg reach its external body");
+                runtime.Step(.02f);
+                LiveSeverRuntimeTests.Check(LivingGibs[0].Body.Velocity.x > lateral + 1f && runtime.Groups.Contains(gibGroup),
+                    "bullet impulse moves the detached leg after refreshing its environment coverage");
+                var otherShape = new GameObject("unrelated collider").AddComponent<BoxCollider>();
+                LiveSeverRuntimeTests.Check(!TryApplyLivingGibPointImpulse(otherShape, Vector3.right, Vector3.zero, out _),
+                    "unrelated colliders do not resolve to a living detached leg");
+                UnityEngine.Object.DestroyImmediate(otherShape.gameObject);
+                lateral = LivingGibs[0].Body.Velocity.x;
+                Vector3 gibCenter = LivingGibs[0].Body.WorldCenterOfMass;
+                LiveSeverRuntimeTests.Check(ApplyLivingGibRadialImpulse(gibCenter + Vector3.right * 50f, 5f, 5f) == 0,
+                    "explosions outside their radius leave the detached leg untouched");
+                LiveSeverRuntimeTests.Check(ApplyLivingGibRadialImpulse(gibCenter - Vector3.right, 5f, 5f) == 1,
+                    "explosions reach a living detached leg");
+                runtime.Step(.02f);
+                LiveSeverRuntimeTests.Check(LivingGibs[0].Body.Velocity.x > lateral + .5f,
+                    "explosion impulse pushes the detached leg away from the blast");
                 ResetLivingFalls();
                 LiveSeverRuntimeTests.Check(runtime.Count == 0 && runtime.Groups.Count == 0 && LivingGibs.Count == 0,
                     "raid reset releases detached legs and environment consumers");

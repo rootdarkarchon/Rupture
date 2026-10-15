@@ -49,7 +49,7 @@ internal static class ImpactWireTests
         string session = new string('a',32);
         Type network = assembly.GetType("Rupture.Impacts.FikaImpactNetwork",true);
         MethodInfo compatible = network.GetMethod("Compatible",Flags);
-        Check((bool)compatible.Invoke(null,new object[] {14,"1.2.1"}) && !(bool)compatible.Invoke(null,new object[] {13,"1.2.1"}) && !(bool)compatible.Invoke(null,new object[] {12,"1.2.1"}) && !(bool)compatible.Invoke(null,new object[] {11,"1.2.1"}) && !(bool)compatible.Invoke(null,new object[] {10,"1.2.0"}) &&
+        Check((bool)compatible.Invoke(null,new object[] {14,"1.2.2"}) && !(bool)compatible.Invoke(null,new object[] {13,"1.2.2"}) && !(bool)compatible.Invoke(null,new object[] {12,"1.2.2"}) && !(bool)compatible.Invoke(null,new object[] {11,"1.2.2"}) && !(bool)compatible.Invoke(null,new object[] {10,"1.2.0"}) &&
             !(bool)compatible.Invoke(null,new object[] {9,"1.1.6"}) && !(bool)compatible.Invoke(null,new object[] {4,"1.1.6"}) &&
             !(bool)compatible.Invoke(null,new object[] {5,"1.1.6"}) && !(bool)compatible.Invoke(null,new object[] {6,"1.1.0"}) &&
             !(bool)compatible.Invoke(null,new object[] {7,"1.1.2"}) && !(bool)compatible.Invoke(null,new object[] {8,"1.1.2"}) &&

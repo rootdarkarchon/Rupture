@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([string]$UnityEditorPath = 'C:\Program Files\Unity 2022.3.43f1\Editor\Unity.exe', [string]$SptInstallPath = 'D:\Tarkov-SPT')
+param([string]$UnityEditorPath = 'C:\Program Files\Unity 2022.3.43f1\Editor\Unity.exe', [Parameter(Mandatory=$true)][string]$SptInstallPath)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $project = Join-Path $repo 'artifacts/HotPathRuntimeUnity'

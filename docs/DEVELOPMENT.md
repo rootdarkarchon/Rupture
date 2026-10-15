@@ -11,7 +11,7 @@ Run commands from the active `rupture` repository root. The former `spt_visceral
 - CMake **3.24 or later**, Visual Studio 2022 with x64 C++ tools and a Windows SDK, plus Git for the pinned PhysX checkout.
 - Python with NumPy for optional calibration, NumPy/Pillow for review images and UnityPy for clothing-fixture extraction. Check each script's input requirements before starting an extraction or sweep.
 
-`Directory.Build.props` accepts `SptInstallPath` or `SPT_ROOT`; its existing `E:\Games\Tarkov-SPT` fallback remains for local compatibility. Pass absolute installation/reference paths explicitly for reproducibility; MSBuild resolves relative hint paths from each project directory. `FikaPluginPath` defaults to the installation's `BepInEx/plugins/Fika` directory. Several focused scripts retain a `D:\Tarkov-SPT` default; override it where they expose `SptInstallPath`.
+`Directory.Build.props` accepts `SptInstallPath` or `SPT_ROOT`; its existing `E:\Games\Tarkov-SPT` fallback remains for local compatibility. Pass absolute installation/reference paths explicitly for reproducibility; MSBuild resolves relative hint paths from each project directory. `FikaPluginPath` defaults to the installation's `BepInEx/plugins/Fika` directory. Scripts that read the game installation require `-SptInstallPath`; none defaults to a machine-specific location.
 
 ```powershell
 $game = 'D:\Tarkov-SPT-4.1' # Replace with your local installation
@@ -69,11 +69,11 @@ See [limb calibration](Limb-Clothing-Folds.md) and the [clothing harness](../uni
 
 ## Packaging and publication boundary
 
-The current source version is 1.2.1, impact protocol 14, native physics ABI 10 and corpse control API V1. All multiplayer peers require the same Rupture build. Preserve configuration keys, wire order, public APIs and compatibility identifiers, including HollywoodFX's legacy GUID match.
+The current source version is 1.2.2, impact protocol 14, native physics ABI 10 and corpse control API V1. All multiplayer peers require the same Rupture build. Preserve configuration keys, wire order, public APIs and compatibility identifiers, including HollywoodFX's legacy GUID match.
 
-Packaging requires **Rupture itself to be a Git repository** because the script enumerates non-ignored files with `git ls-files`. Git initialization is a separate repository-management step; the scripts do not recover history or initialize Git. Until it is authorized, managed/native/Unity validation can proceed but no canonical release ZIP can be generated.
+Packaging requires **Rupture itself to be a Git repository** because the script enumerates non-ignored files with `git ls-files`.
 
-After Git initialization and successful managed, native and resource checks, use only:
+After successful managed, native and resource checks, use only:
 
 ```powershell
 .\scripts\Build-Package.ps1 -SptInstallPath $game -FikaPluginPath $fika -Configuration Release

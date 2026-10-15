@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param([string]$UnityEditorPath = 'C:\Program Files\Unity 2022.3.43f1\Editor\Unity.exe',
-    [string]$SptInstallPath = 'D:\Tarkov-SPT', [switch]$FrameBenchmark, [string]$BaselineSource)
+    [Parameter(Mandatory=$true)][string]$SptInstallPath, [switch]$FrameBenchmark, [string]$BaselineSource)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $env:RPT_SOAK_GAME_ROOT = $SptInstallPath

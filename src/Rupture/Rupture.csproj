@@ -2,8 +2,8 @@
   <PropertyGroup>
     <AssemblyName>Rupture</AssemblyName>
     <RootNamespace>Rupture</RootNamespace>
-    <Version>1.2.1</Version>
-    <AssemblyVersion>1.2.1.0</AssemblyVersion>
+    <Version>1.2.2</Version>
+    <AssemblyVersion>1.2.2.0</AssemblyVersion>
     <TargetFramework>netstandard2.1</TargetFramework>
     <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
