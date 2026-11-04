@@ -18,91 +18,147 @@ internal static partial class HeadWoundSystem
         internal Matrix4x4[] Bindposes;
     }
 
+    private enum HeadStage
+    {
+        Resources, Select, Bake, Acquire, Enqueue, WaitForGeometry,
+        UploadHead, UploadCavity, PrepareSkin, PrepareCavity, TransferDecals, Commit, Count
+    }
+
     private sealed class HeadBuild
     {
         internal CorpseWounds State;
         internal int Revision;
         internal Transform Head, VisualRoot;
         internal Renderer[] HeadRenderers;
-        internal HeadCandidate[] Candidates;
+        internal readonly List<HeadCandidate> Candidates = new List<HeadCandidate>();
+        internal readonly List<HeadWoundGeometrySource> Sources = new List<HeadWoundGeometrySource>();
+        internal SkinnedMeshRenderer[] Renderers;
+        internal int CaptureIndex, AcquisitionPart, UploadPart;
+        internal ProceduralHeadWoundWorkspace CapturedData;
+        internal HeadStage Stage;
         internal HeadWoundGeometryJob Job;
+        internal Mesh CapturedMesh, HeadMesh, CavityMesh;
+        internal HeadCandidate CapturedCandidate;
+        internal BoneWeight[] CapturedWeights;
+        internal Matrix4x4 CapturedToHead;
+        internal Material WoundMaterial, OwnedDecalMaterial;
+        internal Material[] SourceMaterials, ResultMaterials;
+        internal GameObject Replacement;
+        internal SkinnedMeshRenderer Skin;
+        internal MeshRenderer Cavity;
+        internal bool Committed, YieldFrame;
+        internal int CopiedPropertyBlocks;
+        internal string LastCaptureFailure;
         internal double CaptureMilliseconds, BakeMilliseconds, AcquisitionMilliseconds;
     }
 
-    private static bool TryCaptureHead(WoundWorkItem work, CorpseWounds state, Transform head,
-        Renderer[] renderers, out HeadBuild build, out string failure)
+    private static void SelectHeadSources(HeadBuild build)
     {
-        failure = null;
-        build = new HeadBuild { State = state, Revision = state.Revision, Head = head,
-            VisualRoot = work.Target.VisualRoot, HeadRenderers = renderers };
-        long started = Stopwatch.GetTimestamp();
-        var candidates = new List<HeadCandidate>();
-        var sources = new List<HeadWoundGeometrySource>();
+        var state = build.State;
         if (state.Source != null)
         {
-            candidates.Add(new HeadCandidate { Renderer = state.SourceRenderer, NativeMesh = state.NativeMesh,
+            build.Candidates.Add(new HeadCandidate { Renderer = state.SourceRenderer, NativeMesh = state.NativeMesh,
                 Bones = state.Bones, Bindposes = state.Bindposes });
-            sources.Add(state.Source);
+            build.Sources.Add(state.Source);
             build.HeadRenderers = state.HeadRenderers;
+            build.Stage = HeadStage.Enqueue;
+            return;
         }
-        else
+        build.Renderers = build.HeadRenderers.OfType<SkinnedMeshRenderer>()
+            .Where(r => RendererSource.TryGetLodLevel(r, out int level) && level == 0)
+            .OrderByDescending(r => r.enabled).ToArray();
+        build.Stage = HeadStage.Bake;
+    }
+
+    private static void BakeHeadCandidate(HeadBuild build)
+    {
+        if (build.CaptureIndex >= build.Renderers.Length) { build.Stage = HeadStage.Enqueue; return; }
+        var renderer = build.Renderers[build.CaptureIndex++];
+        if (renderer == null) return;
+        Mesh native = renderer.sharedMesh;
+        if (native == null || !native.isReadable) return;
+        Mesh baked = new Mesh { name = "RPT Head Capture", indexFormat = native.indexFormat };
+        long started = Stopwatch.GetTimestamp();
+        try
         {
-            // Capture every eligible LOD0 candidate before the worker chooses the
-            // same closest trajectory/nearest-surface winner as the former path.
-            foreach (var renderer in renderers.OfType<SkinnedMeshRenderer>()
-                .Where(r => RendererSource.TryGetLodLevel(r, out int level) && level == 0)
-                .OrderByDescending(r => r.enabled))
+            renderer.BakeMesh(baked);
+            Transform[] bones = renderer.bones;
+            if (!TryBuildCurrentBindposes(bones, build.Head, out var bindposes, out build.LastCaptureFailure)) return;
+            // Freeze the complete pose together with BakeMesh. Readback may run
+            // in another frame; it must never sample the then-current skeleton.
+            build.CapturedToHead = build.Head.worldToLocalMatrix * renderer.transform.localToWorldMatrix;
+            build.CapturedWeights = native.boneWeights;
+            build.CapturedCandidate = new HeadCandidate { Renderer = renderer, NativeMesh = native, Bones = bones, Bindposes = bindposes };
+            build.CapturedMesh = baked;
+            build.Stage = HeadStage.Acquire;
+        }
+        catch (Exception exception) { build.LastCaptureFailure = $"head capture failed for {renderer.name}: {exception.Message}"; }
+        finally
+        {
+            build.BakeMilliseconds += ElapsedMilliseconds(started);
+            if (build.CapturedMesh != baked) UnityEngine.Object.Destroy(baked);
+            build.YieldFrame = true;
+        }
+    }
+
+    private static void AcquireHeadCandidate(HeadBuild build)
+    {
+        long started = Stopwatch.GetTimestamp();
+        bool release = false;
+        try
+        {
+            if (build.CapturedData == null) build.CapturedData = new ProceduralHeadWoundWorkspace();
+            var data = build.CapturedData;
+            if (!data.AcquireFromMeshPartOnMainThread(build.CapturedMesh, build.AcquisitionPart++, out build.LastCaptureFailure))
+            { release = true; return; }
+            if (build.AcquisitionPart < data.SourceAcquisitionPartCount) return;
+            release = true;
+            data.SourceBoneWeights.Clear();
+            data.SourceBoneWeights.AddRange(build.CapturedWeights);
+            build.Sources.Add(new HeadWoundGeometrySource { Data = data, BoneCount = build.CapturedCandidate.Bones.Length,
+                NeedsTransform = true, ToHead = build.CapturedToHead });
+            build.Candidates.Add(build.CapturedCandidate);
+        }
+        catch (Exception exception) { release = true; build.LastCaptureFailure = $"head readback failed: {exception.Message}"; }
+        finally
+        {
+            build.AcquisitionMilliseconds += ElapsedMilliseconds(started);
+            if (release)
             {
-                Mesh native = renderer.sharedMesh;
-                if (native == null || !native.isReadable) continue;
-                Mesh baked = new Mesh { name = "RPT Head Capture", indexFormat = native.indexFormat };
-                try
-                {
-                    long bakeStarted = Stopwatch.GetTimestamp();
-                    renderer.BakeMesh(baked);
-                    build.BakeMilliseconds += ElapsedMilliseconds(bakeStarted);
-                    Transform[] bones = renderer.bones;
-                    if (!TryBuildCurrentBindposes(bones, head, out var bindposes, out failure)) continue;
-                    long acquisitionStarted = Stopwatch.GetTimestamp();
-                    var data = new ProceduralHeadWoundWorkspace();
-                    if (!data.AcquireFromMeshOnMainThread(baked, out failure)) continue;
-                    data.SourceBoneWeights.Clear();
-                    data.SourceBoneWeights.AddRange(native.boneWeights);
-                    sources.Add(new HeadWoundGeometrySource { Data = data, BoneCount = bones.Length,
-                        NeedsTransform = true, ToHead = head.worldToLocalMatrix * renderer.transform.localToWorldMatrix });
-                    candidates.Add(new HeadCandidate { Renderer = renderer, NativeMesh = native, Bones = bones, Bindposes = bindposes });
-                    build.AcquisitionMilliseconds += ElapsedMilliseconds(acquisitionStarted);
-                }
-                catch (Exception exception) { failure = $"head capture failed for {renderer.name}: {exception.Message}"; }
-                finally { UnityEngine.Object.Destroy(baked); }
+                UnityEngine.Object.Destroy(build.CapturedMesh);
+                build.CapturedMesh = null; build.CapturedCandidate = null; build.CapturedWeights = null; build.CapturedData = null;
+                build.AcquisitionPart = 0;
+                build.Stage = HeadStage.Bake;
             }
         }
-        if (sources.Count == 0)
-        {
-            failure = failure ?? "no readable LOD0 head renderer was identified; lower head LODs are intentionally excluded";
-            return false;
-        }
-        build.Candidates = candidates.ToArray();
-        build.CaptureMilliseconds = ElapsedMilliseconds(started);
-        build.Job = ManagedGeometryWorker.Enqueue(new HeadWoundGeometryJob
-        {
-            Sources = sources.ToArray(), Previous = state.Descriptors.ToArray(),
-            SuppliedEntry = work.Packet.EntryLocal, Direction = work.Packet.DirectionLocal,
-            EntryRadius = work.Packet.EntryRadius, ExitRadius = work.Packet.ExitRadius,
-            MaximumDepth = work.Packet.ConeDepth, Seed = work.Packet.IrregularitySeed
-        });
-        return true;
     }
 
     private static void ReleaseBuild(WoundWorkItem work)
     {
-        if (work?.Build != null) work.Build.Job.Cancelled = true;
+        HeadBuild build = work?.Build;
+        if (build != null)
+        {
+            if (build.Job != null) build.Job.Cancelled = true;
+            if (build.CapturedMesh != null) UnityEngine.Object.Destroy(build.CapturedMesh);
+            if (!build.Committed)
+            {
+                if (!ReferenceEquals(build.Skin, null)) Limbs.LimbDecalTextureTransfer.ReleasePreparedTexture(build.Skin);
+                if (build.OwnedDecalMaterial != null) UnityEngine.Object.Destroy(build.OwnedDecalMaterial);
+                if (build.Replacement != null) UnityEngine.Object.Destroy(build.Replacement);
+                if (build.HeadMesh != null) UnityEngine.Object.Destroy(build.HeadMesh);
+                if (build.CavityMesh != null) UnityEngine.Object.Destroy(build.CavityMesh);
+            }
+        }
         if (work != null) work.Build = null;
         if (ReferenceEquals(_activeWork, work)) _activeWork = null;
     }
 
     private static void CancelActive(CorpseWounds state = null)
     {
-        if (_activeWork != null && (state == null || ReferenceEquals(_activeWork.State, state))) ReleaseBuild(_activeWork);
+        if (_activeWork != null && (state == null || ReferenceEquals(_activeWork.State, state)))
+        {
+            LogHeadStages(_activeWork, ApplyResult.Rejected, "cancelled by corpse removal or reset");
+            ReleaseBuild(_activeWork);
+        }
     }
 }

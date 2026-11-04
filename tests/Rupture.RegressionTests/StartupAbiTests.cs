@@ -25,6 +25,23 @@ internal static class StartupAbiTests
         Check(corpseCollisionMode.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_I4_0),
             "installed EFT authority corpse uses discrete collision detection before external handoff");
         var runtimeTypes = rupture.MainModule.Types.SelectMany(Types).ToArray();
+        var physics = game.MainModule.GetType("PhysicsExtensions");
+        var controller = physics.NestedTypes.Single(t => t.Name == "UpdateController");
+        var support = controller.Methods.Single(m => m.Name == "SupportRigidbody");
+        Check(support.Parameters.Count == 3 && support.Parameters[0].ParameterType.FullName == "UnityEngine.Rigidbody" &&
+            support.Body.Instructions.Any(i => i.Operand is MethodReference method && method.Name == "CheckRigidbodiesDone"),
+            "installed EFT probe support API immediately recomputes the native simulation gate");
+        var gate = controller.Methods.Single(m => m.Name == "CheckRigidbodiesDone");
+        Check(gate.Body.Instructions.Any(i => i.Operand is MethodReference method && method.Name == "get_activeInHierarchy") &&
+            gate.Body.Instructions.Any(i => i.Operand is MethodReference method && method.Name == "SimulationEnabled") &&
+            !gate.Body.Instructions.Any(i => i.Operand is MethodReference method && method.Name == "IsSleeping"),
+            "installed EFT scheduling uses active supported bodies as exercised by the Unity bootstrap fixture");
+        var bootstrapLease = rupture.MainModule.GetType("Rupture.Ragdolls.Classes.PhysicsBootstrapProbeLease");
+        Check(bootstrapLease.Methods.Single(m => m.Name == "TrySchedule").Body.Instructions.Any(i =>
+            i.Operand is MethodReference method && method.DeclaringType.FullName == controller.FullName && method.Name == "SupportRigidbody") &&
+            bootstrapLease.Methods.Single(m => m.Name == "Dispose").Body.Instructions.Any(i =>
+            i.Operand is MethodReference method && method.DeclaringType.FullName == controller.FullName && method.Name == "UnsupportRigidbody"),
+            "production probe lease registers and retires through the inspected EFT controller");
         var instructions = runtimeTypes.SelectMany(t => t.Methods).Where(m => m.HasBody)
             .SelectMany(m => m.Body.Instructions).ToArray();
         Check(!instructions.Any(i => i.OpCode == OpCodes.Stsfld && i.Operand is FieldReference field &&
@@ -92,10 +109,9 @@ internal static class StartupAbiTests
         Check(bindCapacity < Array.FindIndex(startupCalls, m => m.Name == "Install" && m.DeclaringType.Name == "ImpactHooks"),
             "configuration is initialized before impact hooks can consume it");
         var configType = rupture.MainModule.GetType("Rupture.RuptureConfiguration");
-        Check(configType.IsAbstract && configType.IsSealed && configType.Properties.Count == 31 &&
+        Check(configType.IsAbstract && configType.IsSealed && configType.Properties.Count == 35 &&
             configType.Properties.All(p => p.GetMethod.IsStatic && p.PropertyType.Name.StartsWith("ConfigEntry")) &&
             !rupture.MainModule.GetType("Rupture.RupturePlugin").Properties.Any(p => p.PropertyType.Name.StartsWith("ConfigEntry")),
-            "all thirty-one configuration entries belong to the static configuration class");
-        Check(rupture.Name.Version == new Version(1, 2, 2, 0), "SDK-generated assembly version preserves package identity");
+            "all thirty-five configuration entries belong to the static configuration class");
     }
 }

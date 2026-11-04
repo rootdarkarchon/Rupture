@@ -260,6 +260,13 @@ PxFilterFlags filter_shader(
 
 #include "rpt_casings.inl"
 
+struct ResidualDrive
+{
+    uint64_t joint;
+    float stiffness, damping, torque, duration, age;
+    bool force_flag;
+};
+
 struct SceneContext
 {
     PxDefaultAllocator allocator;
@@ -282,6 +289,7 @@ struct SceneContext
 	std::unordered_set<PxRigidDynamic*> ccd_actors;
     HandleStore<PxShape> shapes;
     HandleStore<PxJoint> joints;
+    std::vector<ResidualDrive> residual_drives; // at most 256, only during opt-in transitions
     uint32_t next_filter_shape_id{ 1 };
     std::vector<std::unique_ptr<MeshResource>> mesh_owners;
     std::vector<PxHeightField*> heightfield_owners;
@@ -315,6 +323,68 @@ bool valid_desc(const T* desc)
 }
 
 SceneContext* context(void* scene) { return static_cast<SceneContext*>(scene); }
+
+void set_residual_strength(PxD6Joint& joint, float spring, float damping, float torque)
+{
+    const PxD6JointDrive off(0.f, 0.f, 0.f, false);
+    joint.setDrive(PxD6Drive::eSLERP, off);
+    joint.setDrive(PxD6Drive::eTWIST, off);
+    joint.setDrive(PxD6Drive::eSWING, off);
+    if (torque <= 0.f) return;
+    const PxD6JointDrive drive(spring, damping, torque, false); // force mode, never acceleration mode
+    const bool twist = joint.getMotion(PxD6Axis::eTWIST) != PxD6Motion::eLOCKED;
+    const bool swing1 = joint.getMotion(PxD6Axis::eSWING1) != PxD6Motion::eLOCKED;
+    const bool swing2 = joint.getMotion(PxD6Axis::eSWING2) != PxD6Motion::eLOCKED;
+    if (twist && swing1 && swing2) joint.setDrive(PxD6Drive::eSLERP, drive);
+    else
+    {
+        if (twist) joint.setDrive(PxD6Drive::eTWIST, drive);
+        if (swing1 || swing2) joint.setDrive(PxD6Drive::eSWING, drive);
+    }
+}
+void clear_residual(SceneContext& ctx, size_t index)
+{
+    const ResidualDrive entry = ctx.residual_drives[index];
+    if (auto* base = ctx.joints.get(entry.joint))
+        if (auto* joint = base->is<PxD6Joint>())
+        {
+            set_residual_strength(*joint, 0.f, 0.f, 0.f);
+            joint->setConstraintFlag(PxConstraintFlag::eDRIVE_LIMITS_ARE_FORCES, entry.force_flag);
+        }
+    ctx.residual_drives.erase(ctx.residual_drives.begin() + index);
+}
+void clear_residual_for_actor(SceneContext& ctx, PxRigidActor* actor)
+{
+    for (size_t i = ctx.residual_drives.size(); i-- > 0;)
+    {
+        auto* joint = ctx.joints.get(ctx.residual_drives[i].joint);
+        PxRigidActor *a{}, *b{};
+        if (joint) joint->getActors(a, b);
+        if (!joint || a == actor || b == actor) clear_residual(ctx, i);
+    }
+}
+void advance_residual(SceneContext& ctx, float dt)
+{
+    for (size_t i = ctx.residual_drives.size(); i-- > 0;)
+    {
+        ResidualDrive& entry = ctx.residual_drives[i];
+        auto* base = ctx.joints.get(entry.joint);
+        auto* joint = base ? base->is<PxD6Joint>() : nullptr;
+        PxRigidActor *a{}, *b{};
+        if (joint) joint->getActors(a, b);
+        auto* left = a ? a->is<PxRigidDynamic>() : nullptr;
+        auto* right = b ? b->is<PxRigidDynamic>() : nullptr;
+        if (!joint || !left || !right || left->getRigidBodyFlags().isSet(PxRigidBodyFlag::eKINEMATIC) ||
+            right->getRigidBodyFlags().isSet(PxRigidBodyFlag::eKINEMATIC) ||
+            (joint->getConstraintFlags() & PxConstraintFlag::eBROKEN) ||
+            (left->isSleeping() && right->isSleeping()) || entry.age >= entry.duration)
+        { clear_residual(ctx, i); continue; }
+        const float fade = std::max(0.f, 1.f - entry.age / entry.duration);
+        const float strength = fade * fade;
+        set_residual_strength(*joint, entry.stiffness * strength, entry.damping * strength, entry.torque * strength);
+        entry.age += dt; // only after capacity validation; never advances on a read/buffer retry
+    }
+}
 
 PxCombineMode::Enum combine_mode(uint32_t value)
 {
@@ -1113,6 +1183,7 @@ int32_t RPTPX_CALL rptpx_destroy_actor(void* scene, uint64_t handle)
     std::lock_guard<std::mutex> lock(ctx->gate);
     PxRigidActor* actor = ctx->actors.remove(handle);
     if (!actor) return fail(RPTPX_INVALID_HANDLE, "Actor handle is stale");
+	clear_residual_for_actor(*ctx, actor);
 	if (auto* dynamic = actor->is<PxRigidDynamic>()) ctx->ccd_actors.erase(dynamic);
     const PxU32 count = actor->getNbShapes();
     std::vector<PxShape*> attached(count);
@@ -1130,6 +1201,8 @@ int32_t RPTPX_CALL rptpx_destroy_joint(void* scene, uint64_t handle)
     SceneContext* ctx = context(scene);
     if (!ctx) return fail(RPTPX_INVALID_ARGUMENT, "Scene is required");
     std::lock_guard<std::mutex> lock(ctx->gate);
+    for (size_t i = ctx->residual_drives.size(); i-- > 0;)
+        if (ctx->residual_drives[i].joint == handle) clear_residual(*ctx, i);
     PxJoint* joint = ctx->joints.remove(handle);
     if (!joint) return fail(RPTPX_INVALID_HANDLE, "Joint handle is stale");
     joint->release();
@@ -1189,6 +1262,7 @@ int32_t RPTPX_CALL rptpx_set_actor_state(void* scene, uint64_t handle, const Rpt
         actor->clearTorque(PxForceMode::eFORCE);
         actor->clearTorque(PxForceMode::eIMPULSE);
     }
+    if (will_be_kinematic) clear_residual_for_actor(*ctx, actor);
     actor->setGlobalPose(to_px(state->pose), false);
     if (!will_be_kinematic)
     {
@@ -1196,6 +1270,59 @@ int32_t RPTPX_CALL rptpx_set_actor_state(void* scene, uint64_t handle, const Rpt
         actor->setAngularVelocity(to_px(state->angular_velocity), false);
         if (wake) actor->wakeUp(); else actor->putToSleep();
     }
+    return RPTPX_OK;
+}
+
+int32_t RPTPX_CALL rptpx_get_shape_wireframe(void* scene, uint64_t handle, RptPxVec3* edges,
+    uint32_t capacity, uint32_t* required)
+{
+    SceneContext* ctx = context(scene);
+    if (!ctx || !required || (!edges && capacity)) return fail(RPTPX_INVALID_ARGUMENT, "Invalid wireframe arguments");
+    *required = 0;
+    std::lock_guard<std::mutex> lock(ctx->gate);
+    PxShape* shape = ctx->shapes.get(handle);
+    if (!shape) return fail(RPTPX_INVALID_HANDLE, "Wireframe shape handle is stale");
+    const PxTransform local = shape->getLocalPose();
+    std::vector<RptPxVec3> points;
+    auto edge = [&](const PxVec3& a, const PxVec3& b) {
+        points.push_back(from_px(local.transform(a)));
+        points.push_back(from_px(local.transform(b)));
+    };
+    PxBoxGeometry box;
+    PxConvexMeshGeometry convex;
+    if (shape->getBoxGeometry(box))
+    {
+        PxVec3 corners[8];
+        for (unsigned i = 0; i < 8; ++i)
+            corners[i] = PxVec3((i & 1 ? 1.f : -1.f) * box.halfExtents.x,
+                (i & 2 ? 1.f : -1.f) * box.halfExtents.y, (i & 4 ? 1.f : -1.f) * box.halfExtents.z);
+        for (unsigned i = 0; i < 8; ++i)
+            for (unsigned axis = 1; axis <= 4; axis <<= 1)
+                if (!(i & axis)) edge(corners[i], corners[i | axis]);
+    }
+    else if (shape->getConvexMeshGeometry(convex) && convex.convexMesh)
+    {
+        const PxConvexMesh& mesh = *convex.convexMesh;
+        const PxVec3* vertices = mesh.getVertices();
+        const PxU8* indices = mesh.getIndexBuffer();
+        std::unordered_set<uint32_t> seen;
+        for (PxU32 i = 0; i < mesh.getNbPolygons(); ++i)
+        {
+            PxHullPolygon polygon;
+            if (!mesh.getPolygonData(i, polygon)) return fail(RPTPX_INTERNAL_ERROR, "Invalid wireframe polygon");
+            for (PxU32 j = 0; j < polygon.mNbVerts; ++j)
+            {
+                const uint32_t a = indices[polygon.mIndexBase + j];
+                const uint32_t b = indices[polygon.mIndexBase + (j + 1) % polygon.mNbVerts];
+                const uint32_t key = (std::min(a, b) << 16) | std::max(a, b);
+                if (seen.insert(key).second) edge(convex.scale.transform(vertices[a]), convex.scale.transform(vertices[b]));
+            }
+        }
+    }
+    else return fail(RPTPX_INVALID_ARGUMENT, "Wireframe supports box and convex shapes only");
+    *required = static_cast<uint32_t>(points.size());
+    if (capacity < *required) return RPTPX_BUFFER_TOO_SMALL;
+    std::copy(points.begin(), points.end(), edges);
     return RPTPX_OK;
 }
 
@@ -1279,6 +1406,89 @@ int32_t RPTPX_CALL rptpx_create_d6_joint(void* scene, const RptPxD6JointDesc* de
     return RPTPX_OK;
 }
 
+int32_t RPTPX_CALL rptpx_set_d6_drives(void* scene, const RptPxAngularDriveCommand* commands, uint32_t count)
+{
+    auto* ctx = context(scene);
+    if (!ctx || !commands || count == 0 || count > 32) return fail(RPTPX_INVALID_ARGUMENT, "Angular drive batch must contain 1..32 joints");
+    std::lock_guard<std::mutex> lock(ctx->gate);
+    size_t additions = 0;
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        const auto& c = commands[i];
+        auto* base = ctx->joints.get(c.joint);
+        auto* joint = base ? base->is<PxD6Joint>() : nullptr;
+        const auto& q = c.parent_to_child;
+        if (!valid_desc(&c) || !joint || !finite(q) || std::abs(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w - 1.f) > .01f ||
+            !finite(c.stiffness) || c.stiffness < 0.f || c.stiffness > 1000.f ||
+            !finite(c.damping) || c.damping < 0.f || c.damping > 100.f ||
+            !finite(c.torque_per_row) || c.torque_per_row < 0.f || c.torque_per_row > 100.f ||
+            !finite(c.duration) || c.duration < 0.f || c.duration > 1.f)
+            return fail(RPTPX_INVALID_ARGUMENT, "Invalid/stale angular drive command");
+        for (uint32_t j = 0; j < i; ++j)
+            if (commands[j].joint == c.joint) return fail(RPTPX_INVALID_ARGUMENT, "Repeated angular drive joint");
+        if (c.duration > 0.f)
+        {
+            PxRigidActor *a{}, *b{}; joint->getActors(a, b);
+            auto* left = a ? a->is<PxRigidDynamic>() : nullptr;
+            auto* right = b ? b->is<PxRigidDynamic>() : nullptr;
+            if (!left || !right || left->getRigidBodyFlags().isSet(PxRigidBodyFlag::eKINEMATIC) ||
+                right->getRigidBodyFlags().isSet(PxRigidBodyFlag::eKINEMATIC) ||
+                (joint->getConstraintFlags() & PxConstraintFlag::eBROKEN) ||
+                (joint->getMotion(PxD6Axis::eTWIST) == PxD6Motion::eLOCKED &&
+                 joint->getMotion(PxD6Axis::eSWING1) == PxD6Motion::eLOCKED && joint->getMotion(PxD6Axis::eSWING2) == PxD6Motion::eLOCKED))
+                return fail(RPTPX_INVALID_ARGUMENT, "Angular drives require connected dynamic core actors and an unlocked angular axis");
+            bool present = false;
+            for (const auto& entry : ctx->residual_drives) present |= entry.joint == c.joint;
+            if (!present) ++additions;
+        }
+    }
+    if (ctx->residual_drives.size() + additions > 256) return fail(RPTPX_BUSY, "Transient angular drive capacity exhausted");
+    ctx->residual_drives.reserve(ctx->residual_drives.size() + additions);
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        const auto& c = commands[i];
+        auto* joint = ctx->joints.get(c.joint)->is<PxD6Joint>();
+        for (size_t j = ctx->residual_drives.size(); j-- > 0;)
+            if (ctx->residual_drives[j].joint == c.joint) clear_residual(*ctx, j);
+        if (c.duration == 0.f) continue;
+        const bool force_flag = joint->getConstraintFlags().isSet(PxConstraintFlag::eDRIVE_LIMITS_ARE_FORCES);
+        // Actor0 is the child. Drive pose is joint-frame 1 relative to frame 0.
+        const PxQuat target = joint->getLocalPose(PxJointActorIndex::eACTOR0).q.getConjugate() *
+            to_px(c.parent_to_child).getConjugate() * joint->getLocalPose(PxJointActorIndex::eACTOR1).q;
+        joint->setDrivePosition(PxTransform(PxVec3(0.f), target.getNormalized()), false);
+        joint->setDriveVelocity(PxVec3(0.f), PxVec3(0.f), false);
+        joint->setConstraintFlag(PxConstraintFlag::eDRIVE_LIMITS_ARE_FORCES, true);
+        set_residual_strength(*joint, c.stiffness, c.damping, c.torque_per_row);
+        ctx->residual_drives.push_back({c.joint, c.stiffness, c.damping, c.torque_per_row, c.duration, 0.f, force_flag});
+    }
+    return RPTPX_OK;
+}
+
+int32_t RPTPX_CALL rptpx_get_d6_drives(void* scene, RptPxAngularDriveState* states, uint32_t count)
+{
+    auto* ctx = context(scene);
+    if (!ctx || !states || count == 0 || count > 32) return fail(RPTPX_INVALID_ARGUMENT, "Angular drive read requires 1..32 joints");
+    std::lock_guard<std::mutex> lock(ctx->gate);
+    for (uint32_t i = 0; i < count; ++i)
+        if (!valid_desc(&states[i]) || !ctx->joints.get(states[i].joint) || !ctx->joints.get(states[i].joint)->is<PxD6Joint>())
+            return fail(RPTPX_INVALID_ARGUMENT, "Invalid/stale angular drive read");
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        auto& state = states[i];
+        state.active = 0; state.stiffness = state.damping = state.torque_per_row = state.remaining = 0.f;
+        auto* joint = ctx->joints.get(state.joint)->is<PxD6Joint>();
+        for (const auto& entry : ctx->residual_drives)
+            if (entry.joint == state.joint)
+            {
+                state.active = 1; state.remaining = std::max(0.f, entry.duration - entry.age);
+                const auto& drive = joint->getDrive(joint->getDrive(PxD6Drive::eSLERP).forceLimit > 0.f ? PxD6Drive::eSLERP :
+                    joint->getDrive(PxD6Drive::eTWIST).forceLimit > 0.f ? PxD6Drive::eTWIST : PxD6Drive::eSWING);
+                state.stiffness = drive.stiffness; state.damping = drive.damping; state.torque_per_row = drive.forceLimit;
+            }
+    }
+    return RPTPX_OK;
+}
+
 int32_t RPTPX_CALL rptpx_create_fixed_joint(void* scene, const RptPxFixedJointDesc* desc, uint64_t* output)
 {
     SceneContext* ctx = context(scene);
@@ -1354,10 +1564,13 @@ int32_t RPTPX_CALL rptpx_step(void* scene, float delta_time, RptPxBodyState* sta
     *written_or_required = required;
     if (capacity < required || (required && !states)) return RPTPX_BUFFER_TOO_SMALL;
     ctx->simulating = true;
+    advance_residual(*ctx, delta_time);
     ctx->scene->simulate(delta_time);
     const bool fetched = ctx->scene->fetchResults(true);
     ctx->simulating = false;
     if (!fetched) return fail(RPTPX_PHYSX_ERROR, "PxScene::fetchResults failed");
+    for (size_t i = ctx->residual_drives.size(); i-- > 0;)
+        if (ctx->residual_drives[i].age >= ctx->residual_drives[i].duration) clear_residual(*ctx, i);
     if (ctx->casings) ctx->casings->capture();
     uint32_t written = 0;
     ctx->actors.each_handle([&](uint64_t handle, PxRigidActor* actor) {

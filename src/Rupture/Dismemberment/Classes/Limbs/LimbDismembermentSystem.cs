@@ -357,9 +357,22 @@ internal static partial class LimbDismembermentSystem
 
 	internal static void Update()
 	{
+		long started = Stopwatch.GetTimestamp(), chargedBefore = ProceduralCutFrameBudget.SpentTicks;
+		try { UpdateCore(); }
+		finally
+		{
+			long charged = ProceduralCutFrameBudget.SpentTicks - chargedBefore;
+			ProceduralCutFrameBudget.RecordStage(Stopwatch.GetTimestamp() - started - charged);
+		}
+	}
+
+	private static void UpdateCore()
+	{
+		long housekeepingStarted = Stopwatch.GetTimestamp();
 		while (LimbCutCaptureQueue.TryDequeueReport(out string captureReport))
 			RupturePlugin.Log.LogInfo("RPT limb clothing case: " + captureReport);
 		ProcessDeferredWorkerCleanup();
+		ProceduralCutFrameBudget.RecordStage(Stopwatch.GetTimestamp() - housekeepingStarted);
 		if (_active == null && Pending.Count > 0)
 		{
 			_active = Pending.Dequeue();
@@ -379,9 +392,8 @@ internal static partial class LimbDismembermentSystem
 			_active = null;
 			return;
 		}
-		float budget = Mathf.Clamp(RuptureConfiguration.ProceduralLimbCutMainThreadBudget?.Value ?? 2f, 0.5f, 8f);
-		long frameStarted = Stopwatch.GetTimestamp();
-		while (ReferenceEquals(_active, request))
+		double budget = ProceduralCutFrameBudget.BudgetMilliseconds;
+		while (ReferenceEquals(_active, request) && ProceduralCutFrameBudget.CanRunStage)
 		{
 			long started = Stopwatch.GetTimestamp();
 			SeverStage executedStage = request.Stage;
@@ -424,6 +436,7 @@ internal static partial class LimbDismembermentSystem
 			}
 			finally
 			{
+				ProceduralCutFrameBudget.RecordStage(Stopwatch.GetTimestamp() - started);
 				UnityEngine.Profiling.Profiler.EndSample();
 			}
 
@@ -435,7 +448,7 @@ internal static partial class LimbDismembermentSystem
 			if (!ReferenceEquals(_active, request)) break;
 			bool madeProgress = request.Stage != executedStage ||
 				executedStage == SeverStage.Materialize && request.MaterializeIndex != materializeIndex;
-			if (!madeProgress || ElapsedMilliseconds(frameStarted) >= budget) break;
+			if (!madeProgress || !ProceduralCutFrameBudget.CanRunStage) break;
 		}
 		if (PerformanceLoggingEnabled && !ReferenceEquals(_active, request))
 			RupturePlugin.Log.LogInfo($"RPT limb cut transaction: bodyPart={request.BodyPart}, status={request.FinalStatus}, queueWaitMs={TicksToMilliseconds(request.QueueWaitTicks):F3}, " +

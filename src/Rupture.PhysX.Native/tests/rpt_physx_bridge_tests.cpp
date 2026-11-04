@@ -253,6 +253,9 @@ void test_lzma()
 
 #include "rpt_corpse_drag_tests.inl"
 
+#include "rpt_angular_drive_tests.inl"
+#include "rpt_collider_wireframe_tests.inl"
+
 int main(int argc, char** argv)
 {
     if (argc >= 3 && std::string(argv[1]) == "--casing-mixed")
@@ -315,6 +318,7 @@ int main(int argc, char** argv)
     material_desc.dynamic_friction = 0.6f;
     uint64_t material{};
     check(rptpx_create_material(scene, &material_desc, &material) == RPTPX_OK && material, "material creation");
+    test_box_wireframe(scene, material);
 
     uint64_t ground{};
     auto ground_desc = body(RPTPX_ACTOR_STATIC, 0.f, -0.5f, 0.f);
@@ -494,12 +498,17 @@ int main(int argc, char** argv)
 	auto convex_geometry = box_shape(material, 0.f, 0.f, 0.f, 70);
 	convex_geometry.geometry_kind = RPTPX_GEOMETRY_CONVEX_MESH;
 	convex_geometry.mesh_handle = convex_mesh;
+	convex_geometry.local_pose = pose(4.f, 5.f, 6.f);
+	convex_geometry.local_pose.rotation = axis_angle_x(3.14159265359f * .5f);
+	convex_geometry.mesh_scale = { 2.f, 3.f, 4.f };
 	RptPxVec3 convex_center{};
 	check(rptpx_create_actor(scene, &convex_actor_desc, &convex_actor) == RPTPX_OK &&
 		rptpx_attach_shape(scene, convex_actor, &convex_geometry, &convex_shape) == RPTPX_OK &&
 		rptpx_update_mass_and_inertia(scene, convex_actor, 2.f, &convex_center) == RPTPX_OK &&
 		std::isfinite(convex_center.x) && std::isfinite(convex_center.y) && std::isfinite(convex_center.z),
 		"convex actor derives finite center of mass and inertia from its cooked hull");
+	check_collider_wireframe(scene, convex_shape,
+		{ { 2.f, 9.f, 6.f }, { 6.f, 9.f, 6.f }, { 4.f, 1.f, 6.f }, { 4.f, 5.f, 9.f } }, 12);
 	check(rptpx_destroy_actor(scene, convex_actor) == RPTPX_OK, "convex mass-property actor cleanup");
 	check(rptpx_destroy_mesh(scene, convex_mesh) == RPTPX_OK &&
 		rptpx_destroy_mesh(scene, convex_mesh) == RPTPX_INVALID_HANDLE,
@@ -570,6 +579,7 @@ int main(int argc, char** argv)
 
     test_handle_churn(scene, material);
     rptpx_destroy_scene(scene);
+    test_angular_drives();
     test_ccd(false, false, false);
     test_ccd(true, false, false);
     test_ccd(false, true, false);

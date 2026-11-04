@@ -20,10 +20,15 @@ internal static class ShotImpactProcessor
 		internal float BulletMassGram;
 		internal float VelocityMagnitude;
 		internal Vector3 Direction;
+		internal ulong Projectile;
+		internal uint Instance;
+		internal Item BirthAmmo;
+		internal int BirthFireIndex, BirthFragmentIndex, BirthSeed;
 		internal bool HeadWoundCompleted;
 	}
 
 	private static readonly List<PendingShot> PendingShots = new List<PendingShot>(64);
+	private static uint _nextInstance;
 
 	internal static void Track(EFT.Ballistics.Shot shot)
 	{
@@ -35,10 +40,48 @@ internal static class ShotImpactProcessor
 		PendingShot pending = new PendingShot
 		{
 			Shot = shot,
+			Instance = NextInstance(),
+			BirthAmmo = shot.Ammo, BirthFireIndex = shot.FireIndex, BirthFragmentIndex = shot.FragmentIndex, BirthSeed = shot.RandomSeed,
 			ExpiresAt = Time.realtimeSinceStartup + PendingShotLifetimeSeconds
 		};
 		CaptureFlightState(ref pending);
 		PendingShots.Add(pending);
+	}
+
+	private static uint NextInstance() { if (++_nextInstance == 0) ++_nextInstance; return _nextInstance; }
+	private static bool SameLifetime(PendingShot pending) => ReferenceEquals(pending.BirthAmmo, pending.Shot.Ammo) &&
+		pending.BirthFireIndex == pending.Shot.FireIndex && pending.BirthFragmentIndex == pending.Shot.FragmentIndex && pending.BirthSeed == pending.Shot.RandomSeed;
+
+	// The physical projectile identity deliberately groups penetration segments.
+	// A tracked instance also ties the contact to this particular completion and
+	// prevents a pooled Shot object or a sibling fragment from borrowing it.
+	internal static bool TryGetTrackedContact(EFT.Ballistics.Shot contact, ulong projectile,
+		out EFT.Ballistics.Shot tracked, out uint instance)
+	{
+		tracked = null; instance = 0;
+		for (int depth = 0; contact != null && depth < 32; depth++, contact = contact.Parent)
+		{
+			int match = -1;
+			for (int i = 0; i < PendingShots.Count; i++)
+			{
+				if (!ReferenceEquals(PendingShots[i].Shot, contact)) continue;
+				if (match >= 0) return false; // ambiguous duplicate/pool lifetime
+				match = i;
+			}
+			if (match >= 0)
+			{
+				PendingShot pending = PendingShots[match];
+				if (!SameLifetime(pending)) return false;
+				// Binding must not take an extra flight sample: baseline tracing
+				// must retain the original processor's sampling cadence and force.
+				if (pending.Projectile == 0) pending.Projectile = Rupture.Impacts.ImpactData.ProjectileIdentity(contact);
+				PendingShots[match] = pending;
+				if (projectile == 0 || pending.Projectile != projectile) return false;
+				tracked = contact; instance = pending.Instance; return true;
+			}
+			if (contact.Parent?.BulletState == EFT.Ballistics.Shot.EBulletState.FragmentationHit) return false;
+		}
+		return false;
 	}
 
 	internal static void Update()
@@ -93,6 +136,10 @@ internal static class ShotImpactProcessor
 		{
 			return;
 		}
+		// Retain identity while the shot/parent chain is still live, just as we
+		// retain its last valid flight state before EFT retires the projectile.
+		if (LethalImpulseExperiment.Enabled && pending.Projectile == 0)
+			pending.Projectile = Rupture.Impacts.ImpactData.ProjectileIdentity(shot);
 		if (IsFinitePositive(shot.BulletMassGram))
 		{
 			pending.BulletMassGram = shot.BulletMassGram;
@@ -169,18 +216,27 @@ internal static class ShotImpactProcessor
 			{
 				Vector3 impulse = pending.Direction * impulseMagnitude;
 				appliedImpulseMagnitude = impulseMagnitude;
-				impulseApplied = independentWeaponHit
-					? RagdollCoordinator.TryApplyIndependentWeaponPointImpulse(corpse, hitCollider, impulse, shot.HitPoint, out resolvedBodyName)
-					: corpse != null && RagdollCoordinator.TryApplyCorpsePointImpulse(
-						corpse, physicsHitCollider, impulse, shot.HitPoint, out resolvedBodyName);
-				if (!impulseApplied && rigidbody != null)
+				bool handled = false;
+				LethalImpulseExperiment.Record lethal = independentWeaponHit ? null : LethalImpulseExperiment.CompletedShot(
+					shot, LethalImpulseExperiment.Enabled && SameLifetime(pending) ? pending.Instance : 0, corpse, hitCollider, rigidbody, pending.Projectile,
+					impulse, shot.HitPoint, pending.BulletMassGram, pending.VelocityMagnitude, RuptureConfiguration.ShotIntensity.Value, out handled);
+				if (!handled)
 				{
-					impulseApplied = RagdollCoordinator.TryApplyPointImpulse(rigidbody, impulse, shot.HitPoint);
+					impulseApplied = independentWeaponHit
+						? RagdollCoordinator.TryApplyIndependentWeaponPointImpulse(corpse, hitCollider, impulse, shot.HitPoint, out resolvedBodyName)
+						: corpse != null && RagdollCoordinator.TryApplyCorpsePointImpulse(
+							corpse, physicsHitCollider, impulse, shot.HitPoint, out resolvedBodyName);
+					if (!impulseApplied && rigidbody != null)
+					{
+						impulseApplied = RagdollCoordinator.TryApplyPointImpulse(rigidbody, impulse, shot.HitPoint);
+					}
+					LethalImpulseExperiment.AfterCompleted(lethal, impulseApplied);
 				}
 			}
 		}
 		if (postMortemImpact)
 		{
+			AngularDriveExperiment.CorpseImpact(corpse, impulseApplied, appliedImpulseMagnitude, resolvedBodyName);
 			RupturePlugin.Log.LogInfo($"RPT corpse bullet impulse: profile={corpse?.PlayerProfileID ?? "unknown"}, applied={impulseApplied}, bodyPart={(bodyPartResolved ? resolvedBodyPart.ToString() : "unresolved")}, " +
 				$"body={resolvedBodyName ?? "unresolved"}, nativeBodyAlive={rigidbody != null}, interactionTarget={interactionTarget.VisualRoot != null}, " +
 				$"impulse={appliedImpulseMagnitude:F2}, speed={pending.VelocityMagnitude:F1}, " +

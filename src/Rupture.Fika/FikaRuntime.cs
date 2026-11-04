@@ -24,8 +24,15 @@ internal sealed class FikaRuntime : IMultiplayerRuntime
     public bool IsNetworkAuthority => FikaBackendUtils.IsServer || FikaBackendUtils.IsHeadless;
     public bool HasServer => Singleton<FikaServer>.Instantiated;
     public bool HasClient => Singleton<FikaClient>.Instantiated;
+    // An initialized solo host has no other consumers of diagnostic force changes.
+    // An unavailable transport is ambiguous and must refuse the experiment.
+    public bool HasRemotePeers => HasServer && (Singleton<FikaServer>.Instance.NetServer == null ||
+        Singleton<FikaServer>.Instance.NetServer.ConnectedPeersCount != 0);
     public int PlayerId(Player player) => player is FikaPlayer fika ? fika.NetId : -1;
     public bool IsObservedPlayer(Player player) => player is ObservedPlayer;
+    // Observed bots need not have native AIData, so Player.IsAI alone is not their identity.
+    public bool IsHumanPlayer(Player player) => player != null &&
+        (player.IsYourPlayer || (player is ObservedPlayer observed ? !observed.IsObservedAI : !player.IsAI));
     public bool IsDowned(Player player) => player is FikaPlayer fika && fika.Downed;
     public bool IsRemoteVictim(string profileId) => FikaImpactNetwork.IsRemoteVictim(profileId);
     public string ValidateHeadgearOwner(Player player)

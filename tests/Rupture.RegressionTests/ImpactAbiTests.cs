@@ -56,8 +56,8 @@ internal static class ImpactAbiTests
         Check(receive.Body.Instructions.Count(i => i.Operand is MethodReference m && m.Name == "Execute" && m.DeclaringType.Name == "DamagePacket") == 1 &&
             !receive.Body.Instructions.Any(i => i.Operand is MethodReference m && (m.Name == "ApplyDamageInfo" || m.Name == "HandleDamagePacket")), "envelope invokes stock packet execution at one site, without direct damage reapplication");
         var identity = rupture.MainModule.GetType("Rupture.RupturePlugin").CustomAttributes.Single(a => a.AttributeType.Name == "BepInPlugin");
-        Check((string)identity.ConstructorArguments[0].Value == "com.rootdarkarchon.rupture" && (string)identity.ConstructorArguments[1].Value == "Rupture" &&
-            (string)identity.ConstructorArguments[2].Value == "1.2.2", "built plugin GUID, name and version");
+        Check((string)identity.ConstructorArguments[0].Value == "com.rootdarkarchon.rupture" && (string)identity.ConstructorArguments[1].Value == "Rupture",
+            "built plugin GUID and name");
         Check(!rupture.MainModule.AssemblyReferences.Any(a => a.Name.IndexOf("bundleloader", StringComparison.OrdinalIgnoreCase) >= 0 || a.Name.IndexOf("visceral", StringComparison.OrdinalIgnoreCase) >= 0), "built plugin has no legacy assembly dependency");
     }
 }

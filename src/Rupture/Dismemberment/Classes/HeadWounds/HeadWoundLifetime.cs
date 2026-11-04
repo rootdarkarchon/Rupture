@@ -14,7 +14,9 @@ internal sealed class HeadWoundLifetime : MonoBehaviour
 	private bool[] _originalRendererStates;
 	private Renderer[] _replacementRenderers;
 	private string _key;
+	private Material _ownedDecalMaterial;
 	internal Renderer SkinRenderer => _replacementRenderers?[0];
+	internal Renderer CavityRenderer => _replacementRenderers?[1];
 
 	internal void QueueBloodDecals(Vector3 entryLocal, Vector3 exitLocal, Vector3 directionLocal, bool paintExit)
 	{
@@ -49,13 +51,14 @@ internal sealed class HeadWoundLifetime : MonoBehaviour
 	}
 
 	internal void Initialize(string key, Mesh[] ownedMeshes, Renderer[] disabledRenderers, bool[] originalRendererStates,
-		Renderer[] replacementRenderers)
+		Renderer[] replacementRenderers, Material ownedDecalMaterial = null)
 	{
 		_key = key;
 		_ownedMeshes = ownedMeshes;
 		_disabledRenderers = disabledRenderers;
 		_originalRendererStates = originalRendererStates;
 		_replacementRenderers = replacementRenderers;
+		_ownedDecalMaterial = ownedDecalMaterial;
 	}
 
 	internal void ReplaceMeshes(Mesh head, Mesh cavity)
@@ -109,6 +112,7 @@ internal sealed class HeadWoundLifetime : MonoBehaviour
 
 	private void OnDestroy()
 	{
+		if (_ownedDecalMaterial != null) Destroy(_ownedDecalMaterial);
 		if (_disabledRenderers != null)
 		{
 			for (int index = 0; index < _disabledRenderers.Length; index++)

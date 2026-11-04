@@ -61,6 +61,8 @@ public sealed class ExternalBackendOptions
 	public int DispatcherThreads { get; set; }
 	public int DeadbodyLayer { get; set; }
 	public int EnvironmentMask { get; set; }
+	// Core owns EFT scheduling; the backend releases this lease before destroying its probe.
+	public Func<Rigidbody, IDisposable> ScheduleBootstrapProbe { get; set; }
 	public Action<ExternalLogLevel, string> Log { get; set; }
 }
 
@@ -110,10 +112,19 @@ public readonly struct ExternalBoxShape
 		Size = size;
 		Material = material;
 		ContactOffset = contactOffset;
+		Rotation = Quaternion.identity;
+		ActorSpace = false;
 	}
+
+	// Oriented geometry in unscaled actor-local metres; scale is already baked by the fitter.
+	public ExternalBoxShape(Vector3 center, Vector3 size, Quaternion rotation, PhysicMaterial material, float contactOffset)
+		: this(center, size, material, contactOffset)
+	{ Rotation = rotation; ActorSpace = true; }
 
 	public Vector3 Center { get; }
 	public Vector3 Size { get; }
+	public Quaternion Rotation { get; }
+	public bool ActorSpace { get; }
 	public PhysicMaterial Material { get; }
 	public float ContactOffset { get; }
 }
@@ -126,10 +137,17 @@ public sealed class ExternalRoundedBoxShape
 		Size = size;
 		Material = material;
 		ContactOffset = contactOffset;
+		Rotation = Quaternion.identity;
 	}
+
+	public ExternalRoundedBoxShape(Vector3 center, Vector3 size, Quaternion rotation, PhysicMaterial material, float contactOffset)
+		: this(center, size, material, contactOffset)
+	{ Rotation = rotation; ActorSpace = true; }
 
 	public Vector3 Center { get; }
 	public Vector3 Size { get; }
+	public Quaternion Rotation { get; }
+	public bool ActorSpace { get; }
 	public PhysicMaterial Material { get; }
 	public float ContactOffset { get; }
 }

@@ -30,8 +30,8 @@ internal static class HeadlessConfigurationTests
         object Packet(string session, string[] values, bool requester = true, uint revision = 0)
         {
             object packet = Activator.CreateInstance(hello);
-            hello.GetField("Protocol").SetValue(packet, 14);
-            hello.GetField("Version").SetValue(packet, "1.2.2");
+            hello.GetField("Protocol").SetValue(packet, 15);
+            hello.GetField("Version").SetValue(packet, bridge.GetName().Version.ToString(3));
             hello.GetField("Session").SetValue(packet, session);
             hello.GetField("IsHeadlessRequester").SetValue(packet, requester);
             hello.GetField("VisualConfiguration").SetValue(packet, values);
@@ -67,6 +67,7 @@ internal static class HeadlessConfigurationTests
             Reset();
             string[] original = Capture();
             string[] requested = (string[])original.Clone(); requested[5] = "3"; requested[10] = "24"; requested[13] = "48"; requested[14] = "true"; requested[15] = "true";
+            requested[16] = requested[17] = requested[18] = "false";
             ConfigEntryBase Entry(string name) => (ConfigEntryBase)configuration.GetProperty(name, Flags).GetValue(null);
             runtimeProperty.SetValue(null, Activator.CreateInstance(bridge.GetType("Rupture.Fika.FikaRuntime", true), true));
             FikaBackendUtils.IsHeadless = false;
@@ -77,6 +78,9 @@ internal static class HeadlessConfigurationTests
             network.GetField("_session", Flags).SetValue(null, new string('a', 32));
             Entry("ShotIntensity").BoxedValue = 3f;
             Entry("DismembermentMomentumThreshold").BoxedValue = 24f;
+            Entry("CorrectedLethalImpulse").BoxedValue = false;
+            Entry("InheritRootVelocity").BoxedValue = false;
+            Entry("AngularResistance").BoxedValue = false;
             Entry("LivingLegMomentumThreshold").BoxedValue = 48f;
             Entry("LivingLegSeveringSpecialAI").BoxedValue = true;
             Entry("LivingLegSeveringExplosionsOnly").BoxedValue = true;
@@ -95,6 +99,9 @@ internal static class HeadlessConfigurationTests
             Check(!(bool)hello.GetField("IsHeadlessRequester").GetValue(ordinary) && hello.GetField("VisualConfiguration").GetValue(ordinary) == null,
                 "ordinary joiners do not declare ownership or submit local settings");
             Entry("ShotIntensity").BoxedValue = 1f;
+            Entry("CorrectedLethalImpulse").BoxedValue = true;
+            Entry("InheritRootVelocity").BoxedValue = true;
+            Entry("AngularResistance").BoxedValue = true;
             Entry("DismembermentMomentumThreshold").BoxedValue = 12f;
             Entry("LivingLegMomentumThreshold").BoxedValue = 24f;
             Entry("LivingLegSeveringSpecialAI").BoxedValue = false;

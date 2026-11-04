@@ -62,6 +62,19 @@ internal sealed class NativeScene : IDisposable
 		}
 	}
 
+	internal Vector3[] GetShapeWireframe(ulong shape)
+	{
+		if (_api.GetShapeWireframe == null)
+			throw new NotSupportedException("The native bridge does not provide collider wireframes; rebuild the bridge.");
+		int result = _api.GetShapeWireframe(_handle, shape, null, 0, out uint required);
+		if (result != NativeApi.BufferTooSmall) _api.Check(result, "wireframe size query");
+		if (required == 0 || required > 16384 || (required & 1) != 0)
+			throw new InvalidDataException("Invalid collider wireframe edge count.");
+		var points = new NativeApi.Vec3[required];
+		_api.Check(_api.GetShapeWireframe(_handle, shape, points, required, out _), "wireframe extraction");
+		return Array.ConvertAll(points, point => point.ToUnity());
+	}
+
 	internal List<NativeActor> CreateBatch(IReadOnlyList<ActorSnapshot> snapshots)
 	{
 		List<NativeActor> actors = new List<NativeActor>(snapshots.Count);
@@ -102,6 +115,10 @@ internal sealed class NativeScene : IDisposable
 	{
 		_api.Check(_api.ApplyForces(_handle, new[] { command }, 1), "rptpx_apply_forces");
 	}
+	internal void SetAngularDrives(NativeApi.AngularDriveCommand[] commands) =>
+		_api.Check(_api.SetD6Drives(_handle, commands, (uint)commands.Length), "rptpx_set_d6_drives");
+	internal void ReadAngularDrives(NativeApi.AngularDriveState[] states) =>
+		_api.Check(_api.GetD6Drives(_handle, states, (uint)states.Length), "rptpx_get_d6_drives");
 
     internal void CasingCommands(ExternalCasingFrame frame)
     {
@@ -574,8 +591,8 @@ internal sealed class ActorSnapshot
 	internal static ActorSnapshot CaptureBoxBody(Rigidbody body, ExternalBoxShape box, uint ownerGroup, bool kinematic, int deadbodyLayer, int environmentMask)
 	{
 		float mass = Mathf.Max(0.01f, body.mass);
-		Vector3 scale = Abs(body.transform.lossyScale);
-		Vector3 center = Quaternion.Inverse(body.rotation) * (body.transform.TransformPoint(box.Center) - body.position);
+		Vector3 scale = box.ActorSpace ? Vector3.one : Abs(body.transform.lossyScale);
+		Vector3 center = box.ActorSpace ? box.Center : Quaternion.Inverse(body.rotation) * (body.transform.TransformPoint(box.Center) - body.position);
 		Vector3 size = new Vector3(
 			Mathf.Max(0.02f, Mathf.Abs(box.Size.x) * scale.x),
 			Mathf.Max(0.02f, Mathf.Abs(box.Size.y) * scale.y),
@@ -600,7 +617,7 @@ internal sealed class ActorSnapshot
 		snapshot.Shapes.Add(new ShapeSnapshot
 		{
 			Collider = null, ColliderId = 0, GeometryKind = 1,
-			LocalPose = new NativeApi.Pose(center, Quaternion.identity), Dimensions = size * 0.5f,
+			LocalPose = new NativeApi.Pose(center, box.Rotation), Dimensions = size * 0.5f,
 			Material = new MaterialKey(box.Material), LayerBits = deadbodyBits,
 			CollidesWithBits = (uint)environmentMask | deadbodyBits, OwnerGroup = ownerGroup,
 			ContactOffset = Mathf.Clamp(box.ContactOffset, 0.001f, 0.02f), Enabled = true
@@ -611,8 +628,8 @@ internal sealed class ActorSnapshot
 	internal static ActorSnapshot CaptureRoundedBoxBody(Rigidbody body, ExternalRoundedBoxShape roundedBox, uint ownerGroup, bool kinematic, int deadbodyLayer, int environmentMask)
 	{
 		float mass = Mathf.Max(0.01f, body.mass);
-		Vector3 scale = Abs(body.transform.lossyScale);
-		Vector3 center = Quaternion.Inverse(body.rotation) * (body.transform.TransformPoint(roundedBox.Center) - body.position);
+		Vector3 scale = roundedBox.ActorSpace ? Vector3.one : Abs(body.transform.lossyScale);
+		Vector3 center = roundedBox.ActorSpace ? roundedBox.Center : Quaternion.Inverse(body.rotation) * (body.transform.TransformPoint(roundedBox.Center) - body.position);
 		Vector3 size = new Vector3(
 			Mathf.Max(0.02f, Mathf.Abs(roundedBox.Size.x) * scale.x),
 			Mathf.Max(0.02f, Mathf.Abs(roundedBox.Size.y) * scale.y),
@@ -637,7 +654,7 @@ internal sealed class ActorSnapshot
 		uint deadbodyBits = deadbodyLayer >= 0 ? 1u << deadbodyLayer : uint.MaxValue;
 		snapshot.Shapes.Add(new ShapeSnapshot
 		{
-			Collider = null, ColliderId = 0, GeometryKind = 5, LocalPose = new NativeApi.Pose(center, Quaternion.identity),
+			Collider = null, ColliderId = 0, GeometryKind = 5, LocalPose = new NativeApi.Pose(center, roundedBox.Rotation),
 			Dimensions = Vector3.zero, Mesh = geometry, Material = new MaterialKey(roundedBox.Material), LayerBits = deadbodyBits,
 			CollidesWithBits = (uint)environmentMask | deadbodyBits, OwnerGroup = ownerGroup,
 			ContactOffset = Mathf.Clamp(roundedBox.ContactOffset, 0.001f, 0.02f), Enabled = true

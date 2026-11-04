@@ -24,6 +24,7 @@ $shot = Read-RepoFile "src\Rupture\Ragdolls\Classes\ShotImpactProcessor.cs"
 $system = Read-RepoFile "src\Rupture\Dismemberment\Classes\HeadWounds\HeadWoundSystem.cs"
 $system += Read-RepoFile "src/Rupture/Dismemberment/Classes/RendererSource.cs"
 $system += Read-RepoFile "src/Rupture/Dismemberment/Classes/HeadWounds/HeadWoundSystem.Capture.cs"
+$system += Read-RepoFile "src/Rupture/Dismemberment/Classes/HeadWounds/HeadWoundSystem.Stages.cs"
 $job = Read-RepoFile "src/Rupture/Dismemberment/Classes/HeadWounds/HeadWoundGeometryJob.cs"
 $job += Read-RepoFile "src/Rupture/Dismemberment/Classes/HeadWounds/HeadWoundGeometryJob.Fallback.cs"
 $pipeline = $system + $job
@@ -116,6 +117,19 @@ foreach ($needle in @('RendererSource.TryGetLodLevel(r, out int level) && level 
 	'lower head LODs are intentionally excluded', '.OrderByDescending(r => r.enabled)')) {
 	Require-Text $system $needle "The runtime head renderer selection does not require the readable LOD0 mesh: $needle"
 }
+$limbStages = Read-RepoFile 'src/Rupture/Dismemberment/Classes/Limbs/LimbDismembermentSystem.cs'
+foreach ($consumer in @($system, $limbStages)) {
+    foreach ($needle in @('ProceduralCutFrameBudget.CanRunStage', 'ProceduralCutFrameBudget.RecordStage')) {
+        Require-Text $consumer $needle "Both procedural pipelines must charge and obey the shared frame allowance: $needle"
+    }
+}
+foreach ($needle in @('ProceduralCutFrameBudget.BeginFrame', 'bool headCutsFirst = (Time.frameCount & 1) == 0', 'if (headCutsFirst)', 'if (!headCutsFirst)', 'HeadWoundSystem.PrepareResources()')) {
+    Require-Text $entry $needle "The plugin must reset one allowance and alternate access without starving either pipeline: $needle"
+}
+foreach ($needle in @('ApplyFilteredIndicesPartOnMainThread', 'AcquireFromMeshPartOnMainThread', 'build.Replacement.SetActive(false)',
+    'build.Replacement.SetActive(true)', 'ReleasePreparedTexture', 'build.CapturedToHead', 'stages=totalMs/maxAtomicMs/calls')) {
+    Require-Text $system $needle "Staged head-wound preparation, rollback or diagnostics are missing: $needle"
+}
 foreach ($needle in @('bulletDiameter=', 'entryRadius=', 'entryDiameter=', 'exitRadius=', 'exitDiameter=')) {
     Require-Text $system $needle "The queued head-wound diagnostic does not label ballistic and wound dimensions explicitly: $needle"
 }
@@ -193,18 +207,18 @@ foreach ($needle in @('sourceVertexCount', 'workspace.SourceVertices.Count != so
 	'central entry/exit channel is not open after triangle filtering')) {
     Require-Text $job $needle "Strict specialized-result validation is missing: $needle"
 }
-$validationIndex = $system.IndexOf('if (!job.Succeeded || job.Cancelled)', [StringComparison]::Ordinal)
-$disableIndex = $system.IndexOf('headRenderer.enabled = false', [StringComparison]::Ordinal)
+$validationIndex = $system.IndexOf('if (!build.Job.Succeeded || build.Job.Cancelled)', [StringComparison]::Ordinal)
+$disableIndex = $system.IndexOf('renderer.enabled = false', [StringComparison]::Ordinal)
 if ($validationIndex -lt 0 -or $disableIndex -le $validationIndex) {
     $failures.Add("The original head renderer can be disabled before specialized geometry validation succeeds.")
 }
 foreach ($needle in @('BakeMesh', 'TryResolveEntryExit', 'PendingWounds.Dequeue()', 'queueMs=', 'bakeMs=', 'rayMs=',
-    'acquisitionMs=', 'classificationMs=', 'cavityGenerationMs=', 'meshApplicationMs=', 'managedDeltaBytes=')) {
+    'acquisitionMs=', 'classificationMs=', 'cavityGenerationMs=', 'meshApplicationMs=', 'stages=totalMs/maxAtomicMs/calls')) {
 	Require-Text $pipeline $needle "Geometry/performance pipeline is missing: $needle"
 }
-foreach ($needle in @('data.SourceBoneWeights.AddRange(native.boneWeights)', 'TryBuildCurrentBindposes', 'bakedHead.bindposes = state.Bindposes',
-	'SkinnedMeshRenderer renderer = replacement.AddComponent<SkinnedMeshRenderer>()',
-	'renderer.bones = sourceBones', 'HeadWoundSkinning.SetMesh(renderer, bakedHead, headBone)', 'skinningBones=',
+foreach ($needle in @('data.SourceBoneWeights.AddRange(build.CapturedWeights)', 'TryBuildCurrentBindposes', 'build.HeadMesh.bindposes = source.Bindposes',
+	'build.Skin = build.Replacement.AddComponent<SkinnedMeshRenderer>()',
+	'build.Skin.bones = source.Bones', 'HeadWoundSkinning.SetMesh(build.Skin, build.HeadMesh, build.Head)', 'skinningBones=',
 	'RendererSource.CopyPropertyBlocks', 'source.GetPropertyBlock(properties)',
 	'source.GetPropertyBlock(properties, materialIndex)', 'destination.SetPropertyBlock(properties)',
 	'destination.SetPropertyBlock(properties, materialIndex)', 'rendererPropertyBlocks=')) {
@@ -215,8 +229,8 @@ $skinning = Read-RepoFile 'src/Rupture/Dismemberment/Classes/HeadWounds/HeadWoun
 foreach ($needle in @('renderer.rootBone = headBone', 'renderer.sharedMesh = mesh', 'renderer.localBounds = mesh.bounds')) {
     Require-Text $skinning $needle "Head-local vertices and culling bounds must use the same root: $needle"
 }
-$replacementStart = $system.IndexOf('replacement = new GameObject("RPT Procedural Head Wound")', [StringComparison]::Ordinal)
-$cavityStart = $system.IndexOf('GameObject cavityObject = new GameObject("RPT Procedural Wound Cavity")', [StringComparison]::Ordinal)
+$replacementStart = $system.IndexOf('build.Replacement = new GameObject("RPT Procedural Head Wound")', [StringComparison]::Ordinal)
+$cavityStart = $system.IndexOf('var cavity = new GameObject("RPT Procedural Wound Cavity")', [StringComparison]::Ordinal)
 if ($replacementStart -lt 0 -or $cavityStart -le $replacementStart) {
 	$failures.Add("The active replacement-head renderer block could not be isolated.")
 } else {

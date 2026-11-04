@@ -24,6 +24,14 @@ internal static partial class BenchmarkRuptureHeadWound
         public double warmWorkerMedianMs, warmEnqueueMedianMs, warmUploadMedianMs;
         public double fallbackWorkerMs, craterWorkerMs;
         public int fallbackBuilds, craterBuilds;
+        public StageTimingReport[] initialWoundStages;
+        public double maximumStagedUpdateMs;
+    }
+    [Serializable] private sealed class StageTimingReport
+    {
+        public string stage;
+        public double totalMainMs, maximumAtomicMainMs;
+        public int calls;
     }
     private static WorkerReport _workerReport;
     private const BindingFlags Hidden = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static;
@@ -91,6 +99,16 @@ internal static partial class BenchmarkRuptureHeadWound
                 watch.Stop(); _workerReport.uploadMainMs = watch.Elapsed.TotalMilliseconds;
                 Require(Equal(mesh.vertices, expected.Workspace.SourceVertices) && mesh.bounds == job.HeadBounds && cavity.bounds == job.CavityBounds,
                     "main-thread upload preserves worker vertices and bounds");
+                Require(Equal(mesh.normals, job.Workspace.SourceNormals) && Equal(mesh.tangents, job.Workspace.SourceTangents) &&
+                    Equal(mesh.colors, job.Workspace.SourceColors) && Equal(mesh.boneWeights, job.Workspace.SourceBoneWeights),
+                    "channel-staged upload preserves normals, tangents, colors and weights");
+                for (int uv = 0; uv < 8; uv++)
+                {
+                    var values = new List<Vector4>(); mesh.GetUVs(uv, values);
+                    Require(Equal(values, job.Workspace.SourceUvs[uv]), "channel-staged upload preserves UV " + uv);
+                }
+                for (int submesh = 0; submesh < mesh.subMeshCount; submesh++)
+                    Require(Equal(mesh.GetTriangles(submesh), job.Workspace.GetFilteredSubmesh(submesh)), "channel-staged upload preserves submesh " + submesh);
             }
             finally { UnityEngine.Object.DestroyImmediate(mesh); if (cavity != null) UnityEngine.Object.DestroyImmediate(cavity); }
 
@@ -141,6 +159,8 @@ internal static partial class BenchmarkRuptureHeadWound
             FallbackChecks(input);
             var lifecycle = LifecycleChecks();
             while (lifecycle.MoveNext()) yield return lifecycle.Current;
+            var stages = StagedPipelineChecks();
+            while (stages.MoveNext()) yield return stages.Current;
             _workerReport.passed = true;
             string output = Path.Combine(Directory.GetParent(Application.dataPath).FullName, "worker-verification.json");
             File.WriteAllText(output, JsonUtility.ToJson(_workerReport, true));
@@ -256,7 +276,7 @@ internal static partial class BenchmarkRuptureHeadWound
                     HeadWoundSystem.Enqueue(target, first);
                 }
                 var capture = Stopwatch.StartNew();
-                for (int i = 0; i < 4; i++) HeadWoundSystem.Update();
+                AdvanceUntilQueued();
                 capture.Stop(); _workerReport.captureMainMs = Math.Max(_workerReport.captureMainMs, capture.Elapsed.TotalMilliseconds);
                 object active = typeof(HeadWoundSystem).GetField("_activeWork", Hidden).GetValue(null);
                 if (mode == "headless") { Require(active == null && skin.enabled, "headless admits no geometry"); continue; }
@@ -265,7 +285,7 @@ internal static partial class BenchmarkRuptureHeadWound
                 var pendingJob = (HeadWoundGeometryJob)Field(Field(active, "Build"), "Job");
                 for (int i = 0; i < 20; i++)
                 {
-                    var timer = Stopwatch.StartNew(); HeadWoundSystem.Update(); timer.Stop();
+                    var timer = Stopwatch.StartNew(); AdvanceHeadFrame(); timer.Stop();
                     _workerReport.maximumPendingUpdateMs = Math.Max(_workerReport.maximumPendingUpdateMs, timer.Elapsed.TotalMilliseconds);
                     Require(!pendingJob.Completed && skin.enabled, "Update polls without waiting or exposing partial geometry");
                 }
@@ -282,14 +302,14 @@ internal static partial class BenchmarkRuptureHeadWound
                 root.transform.SetPositionAndRotation(new Vector3(8, 2, -3), Quaternion.Euler(10, 65, 0));
                 secondary.localRotation = Quaternion.Euler(0, 0, 3);
                 barrier.Release.Set(); Wait(pendingJob);
-                HeadWoundSystem.Update();
+                AdvanceHeadFrame();
                 if (mode == "ordered" || mode == "fallback" || mode == "rejected" || mode == "destroyed")
                 {
                     var timer = Stopwatch.StartNew();
                     int expectedCount = mode == "ordered" ? 4 : 1;
                     while (timer.Elapsed.TotalSeconds < 10)
                     {
-                        HeadWoundSystem.Update();
+                        AdvanceHeadFrame();
                         object state = Field(active, "State");
                         if (((IList)Field(state, "Descriptors")).Count == expectedCount) break;
                         Thread.Sleep(1);
@@ -297,6 +317,18 @@ internal static partial class BenchmarkRuptureHeadWound
                     Require(((IList)Field(Field(active, "State"), "Descriptors")).Count == expectedCount, "ordered wound adoption");
                     var lifetime = root.GetComponentInChildren<HeadWoundLifetime>();
                     Require(lifetime != null && !skin.enabled, "validated replacement adopted");
+                    var stageCalls = (int[])Field(active, "StageCalls");
+                    var stageTicks = (long[])Field(active, "StageTicks");
+                    var stageMax = (long[])Field(active, "StageMaxTicks");
+                    Require(stageCalls.All(c => c > 0) && stageTicks.Select((t, i) => t >= stageMax[i] && stageMax[i] > 0).All(v => v),
+                        "all production stages report CPU totals, atomic maxima and call counts");
+                    if (_workerReport.initialWoundStages == null)
+                    {
+                        var names = Enum.GetNames(typeof(HeadWoundSystem).GetNestedType("HeadStage", Hidden));
+                        _workerReport.initialWoundStages = stageCalls.Select((c, i) => new StageTimingReport { stage = names[i], calls = c,
+                            totalMainMs = stageTicks[i] * 1000d / Stopwatch.Frequency,
+                            maximumAtomicMainMs = stageMax[i] * 1000d / Stopwatch.Frequency }).ToArray();
+                    }
                     if (mode == "fallback") Require(pendingJob.UsedFallback &&
                         BloodStreams.PulsatingBloodStreamSystem.LastDirection == pendingJob.ResolvedDirection &&
                         BloodStreams.PulsatingBloodStreamSystem.LastTerminal == pendingJob.TerminalSurfaceResolved,
@@ -317,12 +349,12 @@ internal static partial class BenchmarkRuptureHeadWound
                         Require(nextBarrier.Entered.Wait(TimeSpan.FromSeconds(5)), "second-wound barrier entered");
                         var packet = Packet(target, descriptors[1], 2);
                         if (mode == "rejected") packet.DirectionLocal = Vector3.zero;
-                        HeadWoundSystem.Enqueue(target, packet); HeadWoundSystem.Update();
+                        HeadWoundSystem.Enqueue(target, packet); AdvanceUntilQueued();
                         var nextWork = typeof(HeadWoundSystem).GetField("_activeWork", Hidden).GetValue(null);
                         var nextJob = (HeadWoundGeometryJob)Field(Field(nextWork, "Build"), "Job");
                         Require(replacement.sharedMesh == committed, "prior wound stays visible during the next build");
                         if (mode == "destroyed") UnityEngine.Object.DestroyImmediate(lifetime.gameObject);
-                        nextBarrier.Release.Set(); Wait(nextJob); HeadWoundSystem.Update();
+                        nextBarrier.Release.Set(); Wait(nextJob); AdvanceHeadFrame();
                         if (mode == "rejected")
                         {
                             Require(replacement.sharedMesh == committed && ((IList)Field(Field(active, "State"), "Descriptors")).Count == 1,
@@ -330,7 +362,7 @@ internal static partial class BenchmarkRuptureHeadWound
                             HeadWoundSystem.Enqueue(target, Packet(target, descriptors[2], 3));
                             timer.Restart();
                             while (((IList)Field(Field(active, "State"), "Descriptors")).Count != 2 && timer.Elapsed.TotalSeconds < 10)
-                            { HeadWoundSystem.Update(); Thread.Sleep(1); }
+                            { AdvanceHeadFrame(); Thread.Sleep(1); }
                             Require(((IList)Field(Field(active, "State"), "Descriptors")).Count == 2 && replacement.sharedMesh != committed,
                                 "failed ordinal releases the next valid wound without replay");
                             HeadWoundSystem.Enqueue(target, Packet(target, descriptors[1], 4));
@@ -338,11 +370,11 @@ internal static partial class BenchmarkRuptureHeadWound
                             HeadWoundSystem.Enqueue(target, Packet(target, descriptors[0], 6));
                             timer.Restart();
                             while (((IList)Field(Field(active, "State"), "Descriptors")).Count != 4 && timer.Elapsed.TotalSeconds < 10)
-                            { HeadWoundSystem.Update(); Thread.Sleep(1); }
+                            { AdvanceHeadFrame(); Thread.Sleep(1); }
                             Require(((IList)Field(Field(active, "State"), "Descriptors")).Count == 4,
                                 "failed second attempt still allows four adopted wounds through ordinal five");
                             Mesh full = replacement.sharedMesh;
-                            HeadWoundSystem.Update(); HeadWoundSystem.Enqueue(target, Packet(target, descriptors[0], 7)); HeadWoundSystem.Update();
+                            AdvanceHeadFrame(); HeadWoundSystem.Enqueue(target, Packet(target, descriptors[0], 7)); AdvanceHeadFrame();
                             Require(replacement.sharedMesh == full && typeof(HeadWoundSystem).GetField("_activeWork", Hidden).GetValue(null) == null,
                                 "queued and future attempts cannot build a fifth visible wound");
                             committed = replacement.sharedMesh;
@@ -364,6 +396,25 @@ internal static partial class BenchmarkRuptureHeadWound
                 UnityEngine.Object.DestroyImmediate(mesh); UnityEngine.Object.DestroyImmediate(material);
             }
         }
+    }
+
+    private static void AdvanceHeadFrame()
+    {
+        ProceduralCutFrameBudget.BeginFrame(2f);
+        var timer = Stopwatch.StartNew();
+        HeadWoundSystem.Update(); timer.Stop();
+        _workerReport.maximumStagedUpdateMs = Math.Max(_workerReport.maximumStagedUpdateMs, timer.Elapsed.TotalMilliseconds);
+    }
+
+    private static void AdvanceUntilQueued()
+    {
+        for (int i = 0; i < 100; i++)
+        {
+            AdvanceHeadFrame();
+            var active = typeof(HeadWoundSystem).GetField("_activeWork", Hidden).GetValue(null);
+            if (Rupture.MultiplayerRuntime.Current.IsHeadless || active != null && Field(active, "Build") != null && Field(Field(active, "Build"), "Job") != null) return;
+        }
+        throw new InvalidOperationException("capture did not enqueue within its frame limit");
     }
 
     private static object Field(object target, string name) => target.GetType().GetField(name, Hidden).GetValue(target);

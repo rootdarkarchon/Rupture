@@ -137,8 +137,7 @@ internal sealed class HeightFieldGeometry
 
 internal static class MeshGeometryReader
 {
-	private const int WeaponRoundedBoxArcSegments = 3;
-	private const float WeaponRoundedBoxRadiusFractionOfHalfThickness = 0.8f;
+	private const int WeaponRoundedBoxArcSegments = 4;
 
 	internal static MeshGeometry CreateWeaponRoundedBox(Vector3 requestedSize)
 	{
@@ -147,7 +146,9 @@ internal static class MeshGeometryReader
 			throw new InvalidDataException($"Weapon rounded box has invalid size {requestedSize}.");
 
 		Vector3 half = size * 0.5f;
-		float radius = Mathf.Min(half.x, Mathf.Min(half.y, half.z)) * WeaponRoundedBoxRadiusFractionOfHalfThickness;
+		// Full half-thickness removes the narrow flat strips: top, bottom and ends
+		// meet at a central ridge. Even arc subdivision also includes the 45-degree midpoint.
+		float radius = Mathf.Min(half.x, Mathf.Min(half.y, half.z));
 		Vector3 inner = half - Vector3.one * radius;
 		List<Vector3> vertices = new List<Vector3>();
 		HashSet<Vector3> unique = new HashSet<Vector3>();
@@ -161,12 +162,12 @@ internal static class MeshGeometryReader
 					for (int latitudeStep = 0; latitudeStep <= WeaponRoundedBoxArcSegments; latitudeStep++)
 					{
 						float latitude = Mathf.PI * 0.5f * latitudeStep / WeaponRoundedBoxArcSegments;
-						float latitudeRadius = Mathf.Cos(latitude);
+						float latitudeRadius = latitudeStep == WeaponRoundedBoxArcSegments ? 0f : Mathf.Cos(latitude);
 						for (int longitudeStep = 0; longitudeStep <= WeaponRoundedBoxArcSegments; longitudeStep++)
 						{
 							float longitude = Mathf.PI * 0.5f * longitudeStep / WeaponRoundedBoxArcSegments;
 							Vector3 direction = new Vector3(
-								latitudeRadius * Mathf.Cos(longitude) * xSign,
+								latitudeRadius * (longitudeStep == WeaponRoundedBoxArcSegments ? 0f : Mathf.Cos(longitude)) * xSign,
 								Mathf.Sin(latitude) * ySign,
 								latitudeRadius * Mathf.Sin(longitude) * zSign);
 							Vector3 vertex = corner + direction * radius;
@@ -183,7 +184,7 @@ internal static class MeshGeometryReader
 		{
 			Vertices = vertexArray,
 			Indices = indices,
-			Layout = $"weapon-rounded-box/v1/arc-segments:{WeaponRoundedBoxArcSegments}/radius-fraction:{WeaponRoundedBoxRadiusFractionOfHalfThickness:R}",
+			Layout = $"weapon-rounded-box/v2/arc-segments:{WeaponRoundedBoxArcSegments}/full-thickness-ridge",
 			RawHash = MeshGeometry.HashGeometry(vertexArray, indices),
 			Convex = true,
 			CookingOptions = 0,

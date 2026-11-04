@@ -20,6 +20,7 @@ public class RagdollClassPatch : ModulePatch
 	private static void Postfix(EFT.Interactive.CorpseRagdoll __instance)
 	{
 		RagdollCoordinator.RegisterNativeRagdoll(__instance);
+		LethalImpulseExperiment.Bind(__instance);
 		CorpseWeaponCollisionFilter.CompleteAfterRagdollStart(__instance);
 	}
 }

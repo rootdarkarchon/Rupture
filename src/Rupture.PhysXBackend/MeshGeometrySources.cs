@@ -33,10 +33,16 @@ internal sealed class UnityPhysXMeshGeometrySource : IMeshGeometrySource
 	private const float ProbeSlowWarningFixedSeconds = 15f;
 	private const float ProbeDiagnosticIntervalSeconds = 10f;
 	private const int MaximumProbeDiagnostics = 6;
+	private const int MaximumScheduledProbeUpdates = 120;
 	private readonly NativeApi _api;
 	private readonly int _mainThreadId;
 	private readonly int _environmentMask;
 	private readonly Action<ExternalLogLevel, string> _log;
+	private readonly Func<Rigidbody, IDisposable> _scheduleProbe;
+	private readonly bool _mapAllShapesOnBootstrap;
+	private IDisposable _probeSimulationLease;
+	private int _scheduledProbeUpdates;
+	private int _lastScheduledProbeUpdateFrame = -1;
 	private readonly FieldInfo _actorField;
 	private readonly FieldInfo _otherActorField;
 	private readonly ResolveShapeToColliderDelegate _resolveShapeToCollider;
@@ -73,12 +79,15 @@ internal sealed class UnityPhysXMeshGeometrySource : IMeshGeometrySource
 
 	private delegate Collider ResolveShapeToColliderDelegate(IntPtr shape);
 
-	internal UnityPhysXMeshGeometrySource(NativeApi api, int environmentMask, Action<ExternalLogLevel, string> log)
+	internal UnityPhysXMeshGeometrySource(NativeApi api, int environmentMask, Action<ExternalLogLevel, string> log,
+		Func<Rigidbody, IDisposable> scheduleProbe = null, bool mapAllShapesOnBootstrap = true)
 	{
 		_api = api ?? throw new ArgumentNullException(nameof(api));
 		_mainThreadId = Thread.CurrentThread.ManagedThreadId;
 		_environmentMask = environmentMask;
 		_log = log;
+		_scheduleProbe = scheduleProbe;
+		_mapAllShapesOnBootstrap = mapAllShapesOnBootstrap;
 		if (!string.Equals(Application.unityVersion, SupportedUnityVersion, StringComparison.Ordinal))
 			throw new NotSupportedException($"Unity PhysX extraction supports Unity {SupportedUnityVersion}; this player reports {Application.unityVersion}.");
 
@@ -113,19 +122,38 @@ internal sealed class UnityPhysXMeshGeometrySource : IMeshGeometrySource
 		_startedFrame = Time.frameCount;
 		_startedFixedTime = Time.fixedTime;
 		_startedRealtime = Time.realtimeSinceStartup;
-		_lastPulsedFixedTime = float.NegativeInfinity;
+		// Give the initial overlapping pair a simulation opportunity before the
+		// retry pulse separates it. Render updates can precede the first fixed tick.
+		_lastPulsedFixedTime = Time.fixedTime;
 		_nextDiagnosticRealtime = _startedRealtime + ProbeDiagnosticIntervalSeconds;
 		Physics.ContactModifyEvent += OnContactModify;
 		Physics.ContactModifyEventCCD += OnContactModify;
 		_subscribed = true;
-		CreateProbe();
-		Log(ExternalLogLevel.Info, $"Unity PhysX extraction bootstrap probe created: scene={_probeRoot.scene.name}, position={Format(_probeRoot.transform.position)}, {ProbeStateStatus()}, ignoredNearby={_ignoredNearbyColliders}; waiting for a completed default-scene physics step.");
+		try
+		{
+			CreateProbe();
+			ScheduleProbe();
+			Log(ExternalLogLevel.Info, $"Unity PhysX extraction bootstrap probe created: scene={_probeRoot.scene.name}, position={Format(_probeRoot.transform.position)}, {ProbeStateStatus()}, ignoredNearby={_ignoredNearbyColliders}; waiting for a completed default-scene physics step.");
+		}
+		catch
+		{
+			DestroyProbe();
+			throw;
+		}
 	}
 
 	public void Update()
 	{
 		AssertMainThread();
-		if (_failure != null || IsReady) return;
+		if (_failure != null) { DestroyProbe(); return; }
+		if (IsReady) return;
+		try { ScheduleProbe(); }
+		catch (Exception exception)
+		{
+			_failure = "Probe scheduling failed: " + exception.Message;
+			DestroyProbe();
+			return;
+		}
 		PulseProbeAfterFixedStep();
 		IntPtr actor;
 		lock (_captureGate) actor = _capturedActor;
@@ -137,7 +165,8 @@ internal sealed class UnityPhysXMeshGeometrySource : IMeshGeometrySource
 				_sourceSceneSettings = NativeApi.UnitySceneSettings.Create();
 				_api.Check(_api.GetUnitySceneSettings(_unityScene, ref _sourceSceneSettings), "rptpx_unity_get_scene_settings");
 				_hasSourceSceneSettings = true;
-				RefreshShapeMap(syncTransforms: true);
+				// ProximityCache maps only requested geometry when it is acquired.
+				if (_mapAllShapesOnBootstrap) RefreshShapeMap(syncTransforms: true);
 				int contacts = Volatile.Read(ref _contactCallbacks);
 				DestroyProbe();
 				Log(ExternalLogLevel.Lifecycle, $"Unity PhysX extraction bootstrap ready: {_sourceSceneSettings}, contacts={contacts}, mappedShapes={_mappedShapes}, renderFrames={Time.frameCount - _startedFrame}, fixedSeconds={Time.fixedTime - _startedFixedTime:F2}.");
@@ -149,7 +178,21 @@ internal sealed class UnityPhysXMeshGeometrySource : IMeshGeometrySource
 				_hasSourceSceneSettings = false;
 				Log(ExternalLogLevel.Error, "Unity PhysX extraction native scene traversal failed: " + _failure);
 			}
+			finally { DestroyProbe(); }
 			return;
+		}
+		// Bound our support entry even if a broken callback/scheduler contract never
+		// produces contacts. Paused frames do not consume simulation opportunities.
+		if (_probeSimulationLease != null && Time.deltaTime > 0f && Time.frameCount != _lastScheduledProbeUpdateFrame)
+		{
+			_lastScheduledProbeUpdateFrame = Time.frameCount;
+			if (++_scheduledProbeUpdates >= MaximumScheduledProbeUpdates)
+			{
+				_failure = $"The scheduled Unity PhysX bootstrap probe produced no contact after {_scheduledProbeUpdates} updates.";
+				DestroyProbe();
+				Log(ExternalLogLevel.Error, _failure);
+				return;
+			}
 		}
 
 		float fixedSeconds = Mathf.Max(0f, Time.fixedTime - _startedFixedTime);
@@ -348,6 +391,8 @@ internal sealed class UnityPhysXMeshGeometrySource : IMeshGeometrySource
 		_diagnosticsEmitted = 0;
 		_ignoredNearbyColliders = 0;
 		_probePulseCount = 0;
+		_scheduledProbeUpdates = 0;
+		_lastScheduledProbeUpdateFrame = -1;
 		_slowWarningLogged = false;
 	}
 
@@ -355,20 +400,35 @@ internal sealed class UnityPhysXMeshGeometrySource : IMeshGeometrySource
 
 	private void DestroyProbe()
 	{
+		IDisposable lease = _probeSimulationLease;
+		_probeSimulationLease = null;
+		try { lease?.Dispose(); }
+		finally { DestroyProbeObjects(); }
+	}
+
+	private void DestroyProbeObjects()
+	{
 		if (_subscribed)
 		{
 			Physics.ContactModifyEvent -= OnContactModify;
 			Physics.ContactModifyEventCCD -= OnContactModify;
 			_subscribed = false;
 		}
-		if (_probeRoot != null) UnityEngine.Object.Destroy(_probeRoot);
-		if (_probeDynamicRoot != null) UnityEngine.Object.Destroy(_probeDynamicRoot);
+		// Destroy is deferred: disable immediately so no live probe remains this frame.
+		if (_probeRoot != null) { _probeRoot.SetActive(false); UnityEngine.Object.Destroy(_probeRoot); }
+		if (_probeDynamicRoot != null) { _probeDynamicRoot.SetActive(false); UnityEngine.Object.Destroy(_probeDynamicRoot); }
 		_probeRoot = null;
 		_probeDynamicRoot = null;
 		_probeStationaryBody = null;
 		_probeBody = null;
 		_probeStationaryCollider = null;
 		_probeDynamicCollider = null;
+	}
+
+	private void ScheduleProbe()
+	{
+		if (_probeSimulationLease == null && _probeBody != null)
+			_probeSimulationLease = _scheduleProbe?.Invoke(_probeBody);
 	}
 
 	private void RefreshShapeMap(bool syncTransforms)
@@ -561,7 +621,7 @@ internal sealed class UnityPhysXMeshGeometrySource : IMeshGeometrySource
 		bool pairIgnored = _probeStationaryCollider == null || _probeDynamicCollider == null ||
 			Physics.GetIgnoreCollision(_probeStationaryCollider, _probeDynamicCollider);
 		return $"pair={ProbeOverlapStatus()}, layers={stationaryLayer}/{dynamicLayer}/ignored:{layerIgnored}, pairIgnored={pairIgnored}, " +
-			$"simulationMode={Physics.simulationMode}, invokeCallbacks={Physics.invokeCollisionCallbacks}, timeScale={Time.timeScale:F2}, " +
+			$"simulationMode={Physics.simulationMode}, invokeCallbacks={Physics.invokeCollisionCallbacks}, timeScale={Time.timeScale:F2}, scheduled={_probeSimulationLease != null}, scheduledUpdates={_scheduledProbeUpdates}, " +
 			$"probeActive={(_probeRoot != null && _probeRoot.activeInHierarchy && _probeDynamicRoot != null && _probeDynamicRoot.activeInHierarchy)}, probeAwake={(_probeBody != null && !_probeBody.IsSleeping())}";
 	}
 

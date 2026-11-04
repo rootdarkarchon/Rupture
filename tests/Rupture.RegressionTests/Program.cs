@@ -43,10 +43,13 @@ internal static class Program
             HotPathAbiTests.Run();
         CasingAbiTests.Run(assembly);
         DeathImpactLifecycleTests.Run(assembly);
+        LethalImpulseTests.Run(assembly);
+        AngularDriveTests.Run(assembly);
         NaturalDeathTests.Run(assembly);
         DownedDeathTests.Run(assembly, Bridge);
         ImpactReconciliationTests.Run(assembly, Bridge);
         HeadWoundPolicyTests.Run(assembly);
+        ProceduralCutBudgetTests.Run(assembly);
         HeadgearDiagnosticsTests.Run(assembly, Bridge);
         ImpactWireTests.Run(Bridge);
         ImpactAbiTests.Run(assembly);

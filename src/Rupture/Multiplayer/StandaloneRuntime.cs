@@ -15,8 +15,10 @@ internal sealed class StandaloneRuntime : IMultiplayerRuntime
     public bool IsNetworkAuthority => false;
     public bool HasServer => false;
     public bool HasClient => false;
+    public bool HasRemotePeers => false;
     public int PlayerId(Player player) => -1;
     public bool IsObservedPlayer(Player player) => false;
+    public bool IsHumanPlayer(Player player) => player != null && (player.IsYourPlayer || !player.IsAI);
     public bool IsDowned(Player player) => false;
     public bool IsRemoteVictim(string profileId) => false;
     public string ValidateHeadgearOwner(Player player) => null;

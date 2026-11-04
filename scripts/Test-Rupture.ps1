@@ -33,12 +33,16 @@ if ($ClothingReport) {
 }
 if ($Native) { & (Join-Path $repo 'scripts/Build-PhysXBackend.ps1') }
 if ($UnityRuntime) {
+    & (Join-Path $repo 'scripts/Test-PhysXBootstrapRuntime.ps1')
     & (Join-Path $repo 'scripts/Test-LiveSeverRuntime.ps1')
     & (Join-Path $repo 'scripts/Test-HeadWoundWorker.ps1')
     & (Join-Path $repo 'scripts/Test-ReliabilityRuntime.ps1')
+    & (Join-Path $repo 'scripts/Test-LethalImpulseRuntime.ps1') -SptInstallPath $SptInstallPath
     & (Join-Path $repo 'scripts/Test-CasingRuntime.ps1')
     & (Join-Path $repo 'scripts/Test-HotPathRuntime.ps1') -SptInstallPath $SptInstallPath
     & (Join-Path $repo 'scripts/Test-BloodParcelRuntime.ps1')
     & (Join-Path $repo 'scripts/Test-BloodEmitterRuntime.ps1')
+    & (Join-Path $repo 'scripts/Test-WeaponColliderDebug.ps1')
+    & (Join-Path $repo 'scripts/Test-WeaponColliderGeometry.ps1')
 }
 Write-Output "PASS: managed behavioral regressions and structural checks. Native requested=$Native; Unity runtime requested=$UnityRuntime. Live EFT/Fika acceptance remains separate."

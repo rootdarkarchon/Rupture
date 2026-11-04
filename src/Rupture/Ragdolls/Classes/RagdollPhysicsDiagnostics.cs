@@ -11,6 +11,7 @@ internal static class RagdollPhysicsDiagnostics
 
 	internal static void Update()
 	{
+		LethalImpulseExperiment.Update();
 		PhysicsCounterSampler.Update();
 	}
 

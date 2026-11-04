@@ -15,8 +15,10 @@ internal interface IMultiplayerRuntime : IDisposable
     bool IsNetworkAuthority { get; }
     bool HasServer { get; }
     bool HasClient { get; }
+    bool HasRemotePeers { get; }
     int PlayerId(Player player);
     bool IsObservedPlayer(Player player);
+    bool IsHumanPlayer(Player player);
     bool IsDowned(Player player);
     bool IsRemoteVictim(string profileId);
     string ValidateHeadgearOwner(Player player);

@@ -13,6 +13,7 @@ using SPT.Reflection.Patching;
 using UnityEngine;
 using Rupture.Combined.Patches;
 using Rupture.Impacts;
+using Rupture.Dismemberment.Classes;
 using Rupture.Dismemberment.Classes.BloodStreams;
 using Rupture.Dismemberment.Classes.HeadWounds;
 using Rupture.Dismemberment.Classes.Limbs;
@@ -27,7 +28,7 @@ using MainThreadStage = Rupture.Ragdolls.Classes.ShadowRagdollWorld.MainThreadSt
 
 namespace Rupture;
 
-[BepInPlugin("com.rootdarkarchon.rupture", "Rupture", "1.2.2")]
+[BepInPlugin("com.rootdarkarchon.rupture", "Rupture", "1.3.1")]
 [BepInDependency("com.fika.core", BepInDependency.DependencyFlags.SoftDependency)]
 [BepInDependency("com.janky.hollywoodfx", BepInDependency.DependencyFlags.SoftDependency)]
 [DefaultExecutionOrder(32000)]
@@ -57,6 +58,7 @@ public class RupturePlugin : BaseUnityPlugin
 			return;
 		}
 		_initialized = true;
+		if (!MultiplayerRuntime.Current.IsHeadless) gameObject.AddComponent<WeaponColliderDebugView>();
 		if (!MultiplayerRuntime.Current.IsHeadless) Casings.CasingHooks.Install();
 		if (!MultiplayerRuntime.Current.IsHeadless) BloodDecalBatch.Install();
 		Clothing.ClothingBundleLoader.Install();
@@ -72,6 +74,8 @@ public class RupturePlugin : BaseUnityPlugin
 		new HeavyBleedingPatch().Enable();
 		new KillPatch().Enable();
 		new BodiesImpulsePatch().Enable();
+		LethalImpulseHooks.Install();
+		RootVelocityHooks.Install();
 		new GrenadeDeadBodiesPatch().Enable();
 		new Rupture.Ragdolls.Patches.GameStartedPatch().Enable();
 		new HelmetThrowPhysicsPatch().Enable();
@@ -84,9 +88,12 @@ public class RupturePlugin : BaseUnityPlugin
 		ConsoleScreen.Processor.RegisterCommand("RPTPhysicsBodies", RagdollPhysicsDiagnostics.LogSupportedBodies);
 		ConsoleScreen.Processor.RegisterCommand("RPTPhysicsScene", RagdollPhysicsDiagnostics.LogSceneCensus);
 		ConsoleScreen.Processor.RegisterCommand("RPTPhysicsSample", RagdollPhysicsDiagnostics.ToggleCounterSample);
+		ConsoleScreen.Processor.RegisterCommand("RPTLethalDump", LethalImpulseExperiment.Dump);
+		ConsoleScreen.Processor.RegisterCommand("RPTVelocityDump", RootVelocityExperiment.Dump);
+		ConsoleScreen.Processor.RegisterCommand("RPTAngularDump", AngularDriveExperiment.Dump);
 		ConsoleScreen.Processor.RegisterCommand("RPTShadowStatus", ShadowRagdollWorld.LogStatus);
 		ConsoleScreen.Processor.RegisterCommand("RPTHeadWoundStatus", HeadWoundSystem.LogStatus);
-		Log.Initialization("Rupture initialized. Performance trace schema=12 (half-second soaking, sleep-aware physics, 4 Hz movable-root polling). Runtime diagnostics require Enable Debug Logging.");
+		Log.Initialization("Rupture 1.3.1 initialized. Performance trace schema=12 (half-second soaking, sleep-aware physics, 4 Hz movable-root polling). Runtime diagnostics require Enable Debug Logging.");
 	}
 
 	private static void EnableNativeRagdollIntegration()
@@ -197,6 +204,8 @@ public class RupturePlugin : BaseUnityPlugin
 		if (!_initialized) return;
 		long callbackStarted = ShadowRagdollWorld.PerformanceLoggingEnabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
 		bool raidWorldActive = Singleton<GameWorld>.Instantiated;
+		ProceduralCutFrameBudget.BeginFrame(RuptureConfiguration.ProceduralLimbCutMainThreadBudget?.Value ?? 2f);
+		bool headCutsFirst = (Time.frameCount & 1) == 0;
 		try
 		{
 			using (ShadowRagdollWorld.TraceMainThread(MainThreadStage.UpdateSetup, raidWorldActive))
@@ -216,6 +225,7 @@ public class RupturePlugin : BaseUnityPlugin
 					// Fika or another plugin may have replaced Unity's PlayerLoop after RPT
 					// initialized. Revalidate the presentation-only pass at the raid boundary.
 					ShadowVisiblePosePlayerLoop.EnsureInstalled();
+					HeadWoundSystem.PrepareResources();
 				}
 			}
 			bool raidSimulationActive = raidWorldActive && _raidSimulationStarted;
@@ -223,12 +233,13 @@ public class RupturePlugin : BaseUnityPlugin
 			using (ShadowRagdollWorld.TraceMainThread(MainThreadStage.ImpactState, raidWorldActive)) ImpactStateService.Update();
 			using (ShadowRagdollWorld.TraceMainThread(MainThreadStage.ShotImpacts, raidWorldActive)) ShotImpactProcessor.Update();
 			using (ShadowRagdollWorld.TraceMainThread(MainThreadStage.Headgear, raidWorldActive)) LethalHeadgearDetach.Update();
-			using (ShadowRagdollWorld.TraceMainThread(MainThreadStage.HeadWounds, raidWorldActive)) HeadWoundSystem.Update();
+			if (headCutsFirst) using (ShadowRagdollWorld.TraceMainThread(MainThreadStage.HeadWounds, raidWorldActive)) HeadWoundSystem.Update();
 			using (ShadowRagdollWorld.TraceMainThread(MainThreadStage.Blood, raidWorldActive)) PulsatingBloodStreamSystem.Update();
 			using (ShadowRagdollWorld.TraceMainThread(MainThreadStage.FracturesUpdate, raidWorldActive)) FractureSystem.Update();
 			using (ShadowRagdollWorld.TraceMainThread(MainThreadStage.Coordinator, raidWorldActive)) RagdollCoordinator.Update();
 			using (ShadowRagdollWorld.TraceMainThread(MainThreadStage.ShadowUpdate, raidWorldActive)) ShadowRagdollWorld.Update(raidWorldActive, raidSimulationActive);
 			using (ShadowRagdollWorld.TraceMainThread(MainThreadStage.LimbCuts, raidWorldActive)) LimbDismembermentSystem.Update();
+			if (!headCutsFirst) using (ShadowRagdollWorld.TraceMainThread(MainThreadStage.HeadWounds, raidWorldActive)) HeadWoundSystem.Update();
 			Health.BotSeverStateService.Update(raidSimulationActive);
 			using (ShadowRagdollWorld.TraceMainThread(MainThreadStage.PhysicsDiagnostics, raidWorldActive)) RagdollPhysicsDiagnostics.Update();
 
@@ -303,6 +314,8 @@ public class RupturePlugin : BaseUnityPlugin
 	{
 		if (!_initialized) return;
 		HeadgearPhysicsLifetimePatch.Shutdown();
+		LethalImpulseHooks.Shutdown();
+		RootVelocityHooks.Shutdown();
 		ShadowVisiblePosePlayerLoop.Remove();
 		ResetRuntimeServices();
 		ExternalPhysicsBackendLoader.Shutdown();

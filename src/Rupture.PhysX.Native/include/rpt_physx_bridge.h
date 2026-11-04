@@ -279,6 +279,28 @@ struct RptPxFixedJointDesc
     uint32_t enable_preprocessing;
 };
 
+// Optional additive ABI 10 capability; existing descriptors/exports are unchanged.
+struct RptPxAngularDriveCommand
+{
+    uint32_t struct_size;
+    uint64_t joint;
+    RptPxQuat parent_to_child;
+    float stiffness;
+    float damping;
+    float torque_per_row;
+    float duration;
+};
+struct RptPxAngularDriveState
+{
+    uint32_t struct_size;
+    uint32_t active;
+    uint64_t joint;
+    float stiffness;
+    float damping;
+    float torque_per_row;
+    float remaining;
+};
+
 struct RptPxDistanceJointDesc
 {
     uint32_t struct_size;
@@ -349,8 +371,12 @@ RPTPX_API int32_t RPTPX_CALL rptpx_get_joint_broken(void* scene, uint64_t joint,
 RPTPX_API int32_t RPTPX_CALL rptpx_set_actor_pose(void* scene, uint64_t actor, const RptPxPose* pose, uint32_t kinematic_target);
 RPTPX_API int32_t RPTPX_CALL rptpx_set_actor_state(void* scene, uint64_t actor, const RptPxBodyState* state, uint32_t kinematic, uint32_t wake);
 RPTPX_API int32_t RPTPX_CALL rptpx_set_shape_enabled(void* scene, uint64_t shape, uint32_t enabled);
+// Debug-only box/convex polygon edges in actor space. Query count with null/zero.
+RPTPX_API int32_t RPTPX_CALL rptpx_get_shape_wireframe(void* scene, uint64_t shape, RptPxVec3* edges, uint32_t capacity, uint32_t* required);
 RPTPX_API int32_t RPTPX_CALL rptpx_ignore_shape_pair(void* scene, uint64_t shape0, uint64_t shape1);
 RPTPX_API int32_t RPTPX_CALL rptpx_create_d6_joint(void* scene, const RptPxD6JointDesc* desc, uint64_t* joint);
+RPTPX_API int32_t RPTPX_CALL rptpx_set_d6_drives(void* scene, const RptPxAngularDriveCommand* commands, uint32_t count);
+RPTPX_API int32_t RPTPX_CALL rptpx_get_d6_drives(void* scene, RptPxAngularDriveState* states, uint32_t count);
 RPTPX_API int32_t RPTPX_CALL rptpx_create_fixed_joint(void* scene, const RptPxFixedJointDesc* desc, uint64_t* joint);
 RPTPX_API int32_t RPTPX_CALL rptpx_create_distance_joint(void* scene, const RptPxDistanceJointDesc* desc, uint64_t* joint);
 RPTPX_API int32_t RPTPX_CALL rptpx_apply_forces(void* scene, const RptPxForceCommand* commands, uint32_t count);

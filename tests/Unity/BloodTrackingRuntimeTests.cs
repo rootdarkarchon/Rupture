@@ -44,10 +44,16 @@ namespace EFT.HealthSystem
 namespace EFT
 {
     public sealed class GameWorld { public readonly List<Player> AllAlivePlayersList = new List<Player>(); }
-    public sealed class Player { public int Id; public string ProfileId; public bool IsYourPlayer = true; public bool Downed, TerminalDeath; public IHealthController HealthController; public readonly Bones PlayerBones = new Bones(); public readonly Pose Transform = new Pose(); }
+    public class Player { public int Id; public string ProfileId; public bool IsYourPlayer = true; public object AIData; public bool IsAI => AIData != null; public bool Downed, TerminalDeath; public IHealthController HealthController; public readonly Bones PlayerBones = new Bones(); public readonly Pose Transform = new Pose(); }
     public sealed class Pose { public Transform Original; }
     public sealed class Bones { public readonly List<BodyCollider> BodyPartColliders = new List<BodyCollider>(); }
     public sealed class BodyCollider { public EBodyPart BodyPartType; public EBodyPartColliderType BodyPartColliderType; public Collider Collider; }
+}
+// Observed Fika bots can have no native AIData; IsObservedAI is the authoritative fixture field.
+namespace Fika.Core.Main.Players
+{
+    public class FikaPlayer : EFT.Player { public bool IsObservedAI; }
+    public sealed class ObservedPlayer : FikaPlayer { }
 }
 namespace Comfort.Common { public static class Singleton<T> where T : class { public static T Instance; public static bool Instantiated => Instance != null; } }
 namespace Rupture
@@ -55,7 +61,13 @@ namespace Rupture
     internal static class MultiplayerRuntime
     {
         internal static readonly Runtime Current = new Runtime();
-        internal sealed class Runtime { internal bool IsDowned(Player player) => player.Downed; }
+        internal sealed class Runtime
+        {
+            internal Func<Player, bool> HumanClassifier = new StandaloneRuntime().IsHumanPlayer;
+            internal bool IsHumanPlayer(Player player) => HumanClassifier(player);
+            internal bool IsDowned(Player player) => player.Downed;
+            internal bool IsHeadless => false;
+        }
     }
     public sealed class Flag { public bool Value = true; }
     public static class RuptureConfiguration { public static Flag EnableBloodEffects = new Flag(); }

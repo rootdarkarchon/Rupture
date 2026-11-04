@@ -9,10 +9,11 @@ foreach ($directory in @('Assets/HeadWounds','ProjectSettings','Packages')) {
 Set-Content -LiteralPath (Join-Path $project 'ProjectSettings/ProjectVersion.txt') 'm_EditorVersion: 2022.3.43f1'
 Set-Content -LiteralPath (Join-Path $project 'Packages/manifest.json') '{"dependencies":{"com.unity.modules.physics":"1.0.0","com.unity.modules.jsonserialize":"1.0.0","com.unity.modules.imageconversion":"1.0.0"}}'
 $sources = @('src/Rupture/Dismemberment/Classes/ManagedGeometryWorker.cs',
+    'src/Rupture/Dismemberment/Classes/ProceduralCutFrameBudget.cs',
     'src/Rupture/Dismemberment/Classes/RendererSource.cs',
     'src/Rupture/Dismemberment/Classes/MeshFrameTransform.cs',
     'src/Rupture/Dismemberment/Classes/Packets/HeadWoundPacket.cs',
-    'tests/Unity/HeadWoundWorkerTests.cs','tests/Unity/HeadWoundWorkerFixture.cs')
+    'tests/Unity/HeadWoundWorkerTests.cs','tests/Unity/HeadWoundWorkerFixture.cs','tests/Unity/HeadWoundStagesTests.cs')
 $sources += Get-ChildItem (Join-Path $repo 'src/Rupture/Dismemberment/Classes/HeadWounds') -Filter '*.cs' |
     Where-Object Name -ne 'HeadWoundMaterialProvider.cs' | ForEach-Object FullName
 $sources += Get-ChildItem (Join-Path $repo 'unity/RuptureWound/Assets/Rupture/HeadWounds') -Filter '*.cs' | ForEach-Object FullName

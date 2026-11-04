@@ -54,6 +54,9 @@ internal static class OptionalFikaTests
         var runtime = bridge.MainModule.GetType("Rupture.Fika.FikaRuntime");
         string[] RuntimeCalls(string method) => runtime.Methods.Single(m => m.Name == method).Body.Instructions
             .Select(i => i.Operand).OfType<MethodReference>().Select(m => m.Name).ToArray();
+        Check(RuntimeCalls("get_HasRemotePeers").Contains("get_HasServer") &&
+            RuntimeCalls("get_HasRemotePeers").Contains("get_ConnectedPeersCount"),
+            "Fika local comparison guard reads the live server peer count");
         Check(RuntimeCalls("Initialize").Contains("SubscribeEvent") && RuntimeCalls("Dispose").Contains("UnsubscribeEvent") &&
             RuntimeCalls("Dispose").Count(n => n == "Shutdown") == 3,
             "bridge teardown removes manager subscriptions, Fika hooks and impact network state");
@@ -71,7 +74,7 @@ internal static class OptionalFikaTests
             var owner = assembly.GetType("Rupture.MultiplayerRuntime", true);
             var current = owner.GetProperty("Current", BindingFlags.NonPublic | BindingFlags.Static).GetValue(null);
             var type = current.GetType();
-            foreach (string name in new[] { "IsHeadless", "IsRemoteClient", "IsNetworkAuthority", "HasServer", "HasClient" })
+            foreach (string name in new[] { "IsHeadless", "IsRemoteClient", "IsNetworkAuthority", "HasServer", "HasClient", "HasRemotePeers" })
                 Check(!(bool)type.GetProperty(name).GetValue(current), "standalone " + name + " is false");
             Check((int)type.GetMethod("PlayerId").Invoke(current, new object[] { null }) == -1 &&
                 !(bool)type.GetMethod("IsObservedPlayer").Invoke(current, new object[] { null }) &&

@@ -47,6 +47,9 @@ internal static partial class HeadWoundSystem
 		internal HeadWoundData Packet;
 		internal CorpseWounds State;
 		internal HeadBuild Build;
+		internal readonly long[] StageTicks = new long[(int)HeadStage.Count];
+		internal readonly long[] StageMaxTicks = new long[(int)HeadStage.Count];
+		internal readonly int[] StageCalls = new int[(int)HeadStage.Count];
 		internal int StaleRecaptures;
 		internal float QueuedAt;
 		internal float ExpiresAt;
@@ -289,7 +292,19 @@ internal static partial class HeadWoundSystem
 
 	internal static void Update()
 	{
+		long started = Stopwatch.GetTimestamp(), chargedBefore = ProceduralCutFrameBudget.SpentTicks;
+		try { UpdateCore(); }
+		finally
+		{
+			long charged = ProceduralCutFrameBudget.SpentTicks - chargedBefore;
+			ProceduralCutFrameBudget.RecordStage(Stopwatch.GetTimestamp() - started - charged);
+		}
+	}
+
+	private static void UpdateCore()
+	{
 		PrunePendingLethalHeadshots();
+		WarmHeadResources();
 		if ((_activeWork == null && PendingWounds.Count == 0) || MultiplayerRuntime.Current.IsHeadless) return;
 		WoundWorkItem work = _activeWork ?? PendingWounds.Dequeue();
 		string key = CreateKey(work.Packet.ProfileId, work.Packet.PlayerId, work.Packet.DeathSequence);
@@ -312,9 +327,14 @@ internal static partial class HeadWoundSystem
 		try
 		{
 			if (Time.realtimeSinceStartup >= work.ExpiresAt) { result = ApplyResult.Rejected; failure = "head wound expired before adoption"; }
-			else result = TryApply(work, key, out failure);
+			else result = AdvanceHeadStages(work, key, out failure);
 		}
-		catch (Exception exception) { result = ApplyResult.Rejected; failure = $"head acquisition threw {exception.GetType().Name}: {exception.Message}"; }
+		catch (Exception exception)
+		{
+			result = work.Build?.Committed == true ? ApplyResult.Applied : ApplyResult.Rejected;
+			failure = $"head stage threw {exception.GetType().Name}: {exception.Message}";
+			if (result == ApplyResult.Applied) RupturePlugin.Log.LogWarning($"Head wound committed, but follow-up effects failed: {exception.Message}");
+		}
 		if (result == ApplyResult.Waiting && Time.realtimeSinceStartup < work.ExpiresAt)
 		{
 			if (work.Build != null) _activeWork = work;
@@ -326,6 +346,8 @@ internal static partial class HeadWoundSystem
 				$"mode={work.Build.Job.EntryResolution}, builds={work.Build.Job.GenerationAttempts}, " +
 				$"entrySnapMm={Vector3.Distance(work.Packet.EntryLocal, work.Build.Job.Entry) * 1000f:F1}, " +
 				$"angleDeg={Vector3.Angle(work.Packet.DirectionLocal, work.Build.Job.ResolvedDirection):F1}.");
+		LogHeadStages(work, result, failure);
+		if (result == ApplyResult.Applied) LogApplied(work);
 		ReleaseBuild(work);
 		state.Order.Complete(work.Packet.WoundOrdinal);
 		if (result != ApplyResult.Applied)
@@ -352,6 +374,7 @@ internal static partial class HeadWoundSystem
 	internal static void Reset()
 	{
 		CancelActive();
+		_warmResourcesPending = false;
 		PendingLethalHeadshots.Clear();
 		PendingWounds.Clear();
 		Corpses.Clear();
@@ -405,234 +428,53 @@ internal static partial class HeadWoundSystem
 		catch { return null; }
 	}
 
-	private static ApplyResult TryApply(WoundWorkItem work, string key, out string failure)
+	private static void LogApplied(WoundWorkItem work)
 	{
-		failure = null;
-		if (work.Build != null && !work.Build.Job.Completed) return ApplyResult.Waiting;
-		long totalStarted = Stopwatch.GetTimestamp();
-		long managedBytesBefore = RupturePlugin.Log.IsDebugEnabled ? GC.GetTotalMemory(forceFullCollection: false) : 0L;
-		long materialStarted = Stopwatch.GetTimestamp();
-		if (!HeadWoundMaterialProvider.TryGet(out Material woundMaterial, out failure))
-		{
-			return ApplyResult.Waiting;
-		}
-		double materialMilliseconds = ElapsedMilliseconds(materialStarted);
-		CorpseWounds state = Corpses[key];
-		Transform headBone = work.Target.Head?.Bone;
-		if (headBone == null)
-		{
-			var retained = CorpseHeadContext.Capture(work.Target.Player, work.Target.PlayerBody);
-			retained?.BindIdentity(work.Packet.ProfileId, work.Packet.PlayerId, work.Packet.DeathSequence);
-			headBone = retained?.Bone;
-		}
-		if (headBone == null)
-		{
-			failure = "the retained head bone is unavailable";
-			return ApplyResult.Waiting;
-		}
-		if (!TryGetHeadRenderers(work.Target.PlayerBody, out Renderer[] headRenderers))
-		{
-			failure = "the retained head skin renderers are unavailable";
-			return ApplyResult.Waiting;
-		}
-
-		if (work.Build == null)
-		{
-			if (!TryCaptureHead(work, state, headBone, headRenderers, out var captured, out failure)) return ApplyResult.Rejected;
-			work.Build = captured;
-			return ApplyResult.Waiting;
-		}
-		HeadBuild build = work.Build;
-		HeadWoundGeometryJob job = build.Job;
-		if (!job.Completed) return ApplyResult.Waiting;
-		if (!job.Succeeded || job.Cancelled) { failure = job.Failure ?? "head geometry was cancelled"; return ApplyResult.Rejected; }
-		if (!ReferenceEquals(build.State, state) || build.Revision != state.Revision ||
-			build.Head != headBone || build.VisualRoot != work.Target.VisualRoot || state.Order.Next != work.Packet.WoundOrdinal)
-		{ failure = "head geometry result belongs to a retired corpse or wound revision"; return ApplyResult.Rejected; }
-		HeadCandidate candidate = build.Candidates[job.SourceIndex];
-		SkinnedMeshRenderer sourceRenderer = candidate.Renderer;
-		if (sourceRenderer == null || sourceRenderer.sharedMesh != candidate.NativeMesh || candidate.Bones.Any(bone => bone == null) ||
-			!sourceRenderer.bones.SequenceEqual(candidate.Bones))
-		{
-			failure = "captured head renderer or skeleton changed before adoption";
-			// Corpse handoff or equipment changes can swap the skin while the worker
-			// runs. Rebuild from the current renderer within the same wound lifetime.
-			if (work.StaleRecaptures++ >= MaximumStaleRecaptures) return ApplyResult.Rejected;
-			ReleaseBuild(work);
-			return ApplyResult.Waiting;
-		}
-		headRenderers = build.HeadRenderers;
-		Transform[] sourceBones = candidate.Bones;
-		Vector3 entry = job.Entry, exit = job.Exit;
-		float exitDistance = job.ExitDistance;
-		string entryResolution = job.EntryResolution;
-		bool terminalSurfaceResolved = job.TerminalSurfaceResolved;
-		double bakeMilliseconds = build.BakeMilliseconds, rayMilliseconds = job.RayMilliseconds;
-		double acquisitionMilliseconds = build.AcquisitionMilliseconds;
+		if (!RupturePlugin.Log.IsDebugEnabled || work.Build?.Job == null) return;
+		var build = work.Build; var job = build.Job;
+		var sourceRenderer = build.Candidates[job.SourceIndex].Renderer;
+		var renderer = work.State.Lifetime?.SkinRenderer;
+		var cavityRenderer = work.State.Lifetime?.CavityRenderer;
+		if (renderer == null || cavityRenderer == null) return;
+		var headBone = build.Head; var sourceBones = build.Candidates[job.SourceIndex].Bones;
+		var geometryMetrics = job.Metrics; var bakedHead = build.HeadMesh;
 		int sourceVertexCount = job.Source.Data.SourceVertices.Count;
-		Material[] sourceMaterials = sourceRenderer.sharedMaterials;
-		Material[] resultMaterials = NormalizeMaterials(sourceMaterials, job.Workspace.SubMeshCount);
-		Mesh bakedHead = null, cavityMesh = null;
-		GameObject replacement = null;
-		bool lifetimeOwnsMeshes = false;
-		double meshApplicationMilliseconds = 0d;
-		ProceduralWoundMetrics geometryMetrics = job.Metrics;
-		ProceduralWoundDescriptor descriptor = job.Descriptor;
-		try
-		{
-			long meshApplicationStarted = Stopwatch.GetTimestamp();
-			bakedHead = new Mesh { name = $"RPT Filtered Head Wound {work.Packet.ProfileId}" };
-			job.Workspace.ApplyFilteredIndicesOnMainThread(bakedHead, job.HeadBounds);
-			cavityMesh = job.Workspace.CreateCavityMeshOnMainThread($"RPT Head Wound Cavity {work.Packet.ProfileId}", job.CavityBounds);
-			meshApplicationMilliseconds = ElapsedMilliseconds(meshApplicationStarted);
-			// Pure-data validation completed before any Unity mesh was created. Keep a
-			// cheap upload/layout gate before changing the visible corpse.
-			if (bakedHead.vertexCount != job.Workspace.SourceVertices.Count ||
-				cavityMesh.vertexCount != job.Workspace.CavityVertices.Count || resultMaterials.Length != bakedHead.subMeshCount)
-			{ failure = "head mesh upload did not preserve the validated layout"; return ApplyResult.Rejected; }
-			state.Source = job.Source; state.SourceRenderer = sourceRenderer; state.NativeMesh = candidate.NativeMesh;
-			state.HeadRenderers = headRenderers; state.Bones = sourceBones; state.Bindposes = candidate.Bindposes;
-
-			bakedHead.bindposes = state.Bindposes;
-			if (state.Lifetime != null)
-			{
-				state.Lifetime.ReplaceMeshes(bakedHead, cavityMesh);
-				lifetimeOwnsMeshes = true;
-				state.Descriptors.Add(descriptor);
-				state.Revision++;
-				PulsatingBloodStreamSystem.StartPostMortemHeadWound(work.Target, work.Packet, headBone, entry, exit,
-					job.ResolvedDirection, terminalSurfaceResolved);
-				int decals = PaintVanillaBloodDecals(state.Lifetime, headBone.TransformPoint(entry), headBone.TransformPoint(exit),
-					headBone.TransformDirection(job.ResolvedDirection).normalized, terminalSurfaceResolved);
-				if (work.Packet.IsLethal) PulsatingBloodStreamSystem.ResolveHeadExit(work.Packet, headBone, exit,
-					job.ResolvedDirection, terminalSurfaceResolved, entry);
-				if (RupturePlugin.Log.IsDebugEnabled) RupturePlugin.Log.LogInfo($"Procedural head wound applied: profile={work.Packet.ProfileId}, ordinal={work.Packet.WoundOrdinal}, " +
-					$"wounds={state.Descriptors.Count}, headVertices={bakedHead.vertexCount}, cavityVertices={cavityMesh.vertexCount}, " +
-					$"queuedBloodDecals={decals}, captureMainMs={build.CaptureMilliseconds:F2}, geometryWorkerMs={job.WorkerMilliseconds:F2}, applyMainMs={ElapsedMilliseconds(totalStarted):F2}, endToEndMs={(Time.realtimeSinceStartup - work.QueuedAt) * 1000:F2}.");
-				return ApplyResult.Applied;
-			}
-
-			bool[] originalRendererStates = new bool[headRenderers.Length];
-			for (int index = 0; index < headRenderers.Length; index++)
-			{
-				originalRendererStates[index] = headRenderers[index] != null && headRenderers[index].enabled;
-			}
-
-			replacement = new GameObject("RPT Procedural Head Wound");
-			replacement.layer = sourceRenderer.gameObject.layer;
-			replacement.transform.SetParent(headBone, worldPositionStays: false);
-			replacement.transform.localPosition = Vector3.zero;
-			replacement.transform.localRotation = Quaternion.identity;
-			replacement.transform.localScale = Vector3.one;
-			bakedHead.bindposes = state.Bindposes;
-			SkinnedMeshRenderer renderer = replacement.AddComponent<SkinnedMeshRenderer>();
-			renderer.bones = sourceBones;
-			HeadWoundSkinning.SetMesh(renderer, bakedHead, headBone);
-			renderer.sharedMaterials = resultMaterials;
-			renderer.quality = sourceRenderer.quality;
-			renderer.updateWhenOffscreen = sourceRenderer.updateWhenOffscreen;
-			CopyRendererSettings(sourceRenderer, renderer);
-			int copiedPropertyBlocks = RendererSource.CopyPropertyBlocks(sourceRenderer, renderer,
-				Mathf.Min(sourceMaterials?.Length ?? 0, resultMaterials.Length));
-			renderer.enabled = true;
-			renderer.forceRenderingOff = false;
-			Rupture.Dismemberment.Classes.Limbs.LimbDecalTextureTransfer.CopyExisting(sourceRenderer, renderer, out _);
-
-			GameObject cavityObject = new GameObject("RPT Procedural Wound Cavity");
-			cavityObject.layer = sourceRenderer.gameObject.layer;
-			cavityObject.transform.SetParent(replacement.transform, worldPositionStays: false);
-			cavityObject.transform.localPosition = Vector3.zero;
-			cavityObject.transform.localRotation = Quaternion.identity;
-			cavityObject.transform.localScale = Vector3.one;
-			cavityObject.AddComponent<MeshFilter>().sharedMesh = cavityMesh;
-			MeshRenderer cavityRenderer = cavityObject.AddComponent<MeshRenderer>();
-			cavityRenderer.sharedMaterial = woundMaterial;
-			CopyRendererSettings(sourceRenderer, cavityRenderer);
-			cavityRenderer.enabled = true;
-			cavityRenderer.forceRenderingOff = false;
-
-			HeadWoundLifetime lifetime = replacement.AddComponent<HeadWoundLifetime>();
-			lifetime.Initialize(key, new[] { bakedHead, cavityMesh }, headRenderers, originalRendererStates,
-				new Renderer[] { renderer, cavityRenderer });
-			lifetimeOwnsMeshes = true;
-			ActiveWounds.Add(lifetime);
-			state.Lifetime = lifetime;
-			state.Descriptors.Add(descriptor);
-			state.Revision++;
-			PulsatingBloodStreamSystem.StartPostMortemHeadWound(work.Target, work.Packet, headBone, entry, exit,
-				job.ResolvedDirection, terminalSurfaceResolved);
-			Vector3 resolvedEntryWorld = headBone.TransformPoint(entry);
-			Vector3 resolvedExitWorld = headBone.TransformPoint(exit);
-			Vector3 decalDirectionWorld = headBone.TransformDirection(job.ResolvedDirection).normalized;
-			if (work.Packet.IsLethal) PulsatingBloodStreamSystem.ResolveHeadExit(work.Packet, headBone, exit,
-				job.ResolvedDirection, terminalSurfaceResolved, entry);
-			int vanillaBloodDecalCount = PaintVanillaBloodDecals(state.Lifetime, resolvedEntryWorld,
-				resolvedExitWorld, decalDirectionWorld, terminalSurfaceResolved);
-			for (int index = 0; index < headRenderers.Length; index++)
-			{
-				Renderer headRenderer = headRenderers[index];
-				if (headRenderer != null)
-				{
-					headRenderer.enabled = false;
-				}
-			}
-
-			if (RupturePlugin.Log.IsDebugEnabled)
-			{
-				double totalMilliseconds = ElapsedMilliseconds(totalStarted);
-				long managedAllocationDelta = Math.Max(0L, GC.GetTotalMemory(forceFullCollection: false) - managedBytesBefore);
-				double queueMilliseconds = Mathf.Max(0f, Time.realtimeSinceStartup - work.QueuedAt) * 1000.0;
-				Vector3 suppliedEntryWorld = headBone.TransformPoint(work.Packet.EntryLocal);
-				float entrySnapDistance = Vector3.Distance(work.Packet.EntryLocal, entry);
-				RupturePlugin.Log.LogInfo($"Procedural head wound applied: profile={work.Packet.ProfileId}, renderer={sourceRenderer.name}, " +
-					$"suppliedEntryWorld={FormatVector(suppliedEntryWorld)}, resolvedEntryWorld={FormatVector(resolvedEntryWorld)}, " +
-					$"resolvedExitWorld={FormatVector(resolvedExitWorld)}, entrySnapMm={entrySnapDistance * 1000f:F2}, " +
-					$"entryResolution={entryResolution}, terminalResolution={(terminalSurfaceResolved ? "surface" : "cone-extent")}, " +
-					$"directionWorld={FormatVector(decalDirectionWorld)}, queuedBloodDecals={vanillaBloodDecalCount}, " +
-					$"replacementEnabled={renderer.enabled && cavityRenderer.enabled}, skinningBones={sourceBones.Length}, " +
-					$"sourceBoundsRoot={sourceRenderer.rootBone?.name ?? "none"}, replacementBoundsRoot={headBone.name}, " +
-					$"rendererPropertyBlocks={copiedPropertyBlocks}, sourceVertices={sourceVertexCount}, " +
-					$"resultHeadVertices={bakedHead.vertexCount}, sourceTriangles={geometryMetrics.SourceTriangleCount}, " +
-					$"candidateTriangles={geometryMetrics.CandidateTriangleCount}, intersectedSourceTriangles={geometryMetrics.IntersectedSourceTriangleCount}, " +
-					$"clippedTriangles={geometryMetrics.ClippedTriangleCount}, removedFragments={geometryMetrics.RemovedTriangleCount}, " +
-					$"entryCoverageMm={geometryMetrics.EntryOpeningCoverageRadius * 1000f:F3}, exitCoverageMm={geometryMetrics.ExitOpeningCoverageRadius * 1000f:F3}, " +
-					$"entryLipRadiusMm={geometryMetrics.EntryRimOuterRadius * 1000f:F3}, exitBurstRadiusMm={geometryMetrics.ExitRimOuterRadius * 1000f:F3}, " +
-					$"minimumOverlapMm={geometryMetrics.MinimumRimCoverageMargin * 1000f:F3}, rimVertices={geometryMetrics.RimVertexCount}, rimTriangles={geometryMetrics.RimTriangleCount}, " +
-					$"boundaryComponents={geometryMetrics.BoundaryComponentCount}, openBoundaryComponents={geometryMetrics.OpenBoundaryComponentCount}, " +
-					$"solidCanalSpans={geometryMetrics.SolidCanalSpanCount}, entryLips={geometryMetrics.EntryLipCount}, " +
-					$"intermediateLips={geometryMetrics.IntermediateLipCount}, exitFlaps={geometryMetrics.ExitFlapCount}, " +
-					$"entryRimFacing={geometryMetrics.MinimumEntryRimFacingDot:F3}, exitRimFacing={geometryMetrics.MinimumExitRimFacingDot:F3}, " +
-					$"entrySurfaceSamples={geometryMetrics.EntryRimSurfaceHitCount}, exitSurfaceSamples={geometryMetrics.ExitRimSurfaceHitCount}, " +
-					$"cavityVertices={geometryMetrics.CavityVertexCount}, cavityTriangles={geometryMetrics.CavityTriangleCount}, " +
-					$"entryExitDistance={exitDistance:F3}m, queueMs={queueMilliseconds:F2}, materialMs={materialMilliseconds:F2}, " +
-					$"bakeMs={bakeMilliseconds:F2}, rayMs={rayMilliseconds:F2}, acquisitionMs={acquisitionMilliseconds:F2}, " +
-					$"classificationMs={geometryMetrics.TriangleClassificationMilliseconds:F2}, cavityGenerationMs={geometryMetrics.CavityGenerationMilliseconds:F2}, " +
-					$"meshApplicationMs={meshApplicationMilliseconds:F2}, captureMainMs={build.CaptureMilliseconds:F2}, geometryWorkerMs={job.WorkerMilliseconds:F2}, validationWorkerMs={job.ValidationMilliseconds:F2}, applyMainMs={totalMilliseconds:F2}, managedDeltaBytes={managedAllocationDelta}.");
-			}
-			return ApplyResult.Applied;
-		}
-		catch (Exception exception)
-		{
-			if (lifetimeOwnsMeshes)
-			{
-				RupturePlugin.Log.LogWarning($"Head wound committed, but follow-up effects failed: {exception.Message}");
-				return ApplyResult.Applied;
-			}
-			if (replacement != null)
-			{
-				UnityEngine.Object.Destroy(replacement);
-			}
-			failure = $"specialized head-wound generation threw {exception.GetType().Name}: {exception.Message}";
-			return ApplyResult.Rejected;
-		}
-		finally
-		{
-			if (!lifetimeOwnsMeshes)
-			{
-				if (bakedHead != null) UnityEngine.Object.Destroy(bakedHead);
-				if (cavityMesh != null) UnityEngine.Object.Destroy(cavityMesh);
-			}
-		}
+		int copiedPropertyBlocks = build.CopiedPropertyBlocks;
+		int vanillaBloodDecalCount = RuptureConfiguration.EnableBloodEffects?.Value == true ? (job.TerminalSurfaceResolved ? 2 : 1) : 0;
+		Vector3 suppliedEntryWorld = headBone.TransformPoint(work.Packet.EntryLocal);
+		Vector3 resolvedEntryWorld = headBone.TransformPoint(job.Entry), resolvedExitWorld = headBone.TransformPoint(job.Exit);
+		Vector3 decalDirectionWorld = headBone.TransformDirection(job.ResolvedDirection).normalized;
+		float entrySnapDistance = Vector3.Distance(work.Packet.EntryLocal, job.Entry), exitDistance = job.ExitDistance;
+		string entryResolution = job.EntryResolution; bool terminalSurfaceResolved = job.TerminalSurfaceResolved;
+		double totalMilliseconds = work.StageTicks.Skip((int)HeadStage.UploadHead).Sum() * 1000d / Stopwatch.Frequency;
+		double queueMilliseconds = (Time.realtimeSinceStartup - work.QueuedAt) * 1000d;
+		double materialMilliseconds = work.StageTicks[(int)HeadStage.Resources] * 1000d / Stopwatch.Frequency;
+		double meshApplicationMilliseconds = (work.StageTicks[(int)HeadStage.UploadHead] + work.StageTicks[(int)HeadStage.UploadCavity]) * 1000d / Stopwatch.Frequency;
+		double bakeMilliseconds = build.BakeMilliseconds, acquisitionMilliseconds = build.AcquisitionMilliseconds, rayMilliseconds = job.RayMilliseconds;
+		RupturePlugin.Log.LogInfo($"Procedural head wound applied: profile={work.Packet.ProfileId}, renderer={sourceRenderer.name}, " +
+			$"suppliedEntryWorld={FormatVector(suppliedEntryWorld)}, resolvedEntryWorld={FormatVector(resolvedEntryWorld)}, " +
+			$"resolvedExitWorld={FormatVector(resolvedExitWorld)}, entrySnapMm={entrySnapDistance * 1000f:F2}, " +
+			$"entryResolution={entryResolution}, terminalResolution={(terminalSurfaceResolved ? "surface" : "cone-extent")}, " +
+			$"directionWorld={FormatVector(decalDirectionWorld)}, queuedBloodDecals={vanillaBloodDecalCount}, " +
+			$"replacementEnabled={renderer.enabled && cavityRenderer.enabled}, skinningBones={sourceBones.Length}, " +
+			$"sourceBoundsRoot={sourceRenderer.rootBone?.name ?? "none"}, replacementBoundsRoot={headBone.name}, " +
+			$"rendererPropertyBlocks={copiedPropertyBlocks}, sourceVertices={sourceVertexCount}, " +
+			$"resultHeadVertices={bakedHead.vertexCount}, sourceTriangles={geometryMetrics.SourceTriangleCount}, " +
+			$"candidateTriangles={geometryMetrics.CandidateTriangleCount}, intersectedSourceTriangles={geometryMetrics.IntersectedSourceTriangleCount}, " +
+			$"clippedTriangles={geometryMetrics.ClippedTriangleCount}, removedFragments={geometryMetrics.RemovedTriangleCount}, " +
+			$"entryCoverageMm={geometryMetrics.EntryOpeningCoverageRadius * 1000f:F3}, exitCoverageMm={geometryMetrics.ExitOpeningCoverageRadius * 1000f:F3}, " +
+			$"entryLipRadiusMm={geometryMetrics.EntryRimOuterRadius * 1000f:F3}, exitBurstRadiusMm={geometryMetrics.ExitRimOuterRadius * 1000f:F3}, " +
+			$"minimumOverlapMm={geometryMetrics.MinimumRimCoverageMargin * 1000f:F3}, rimVertices={geometryMetrics.RimVertexCount}, rimTriangles={geometryMetrics.RimTriangleCount}, " +
+			$"boundaryComponents={geometryMetrics.BoundaryComponentCount}, openBoundaryComponents={geometryMetrics.OpenBoundaryComponentCount}, " +
+			$"solidCanalSpans={geometryMetrics.SolidCanalSpanCount}, entryLips={geometryMetrics.EntryLipCount}, " +
+			$"intermediateLips={geometryMetrics.IntermediateLipCount}, exitFlaps={geometryMetrics.ExitFlapCount}, " +
+			$"entryRimFacing={geometryMetrics.MinimumEntryRimFacingDot:F3}, exitRimFacing={geometryMetrics.MinimumExitRimFacingDot:F3}, " +
+			$"entrySurfaceSamples={geometryMetrics.EntryRimSurfaceHitCount}, exitSurfaceSamples={geometryMetrics.ExitRimSurfaceHitCount}, " +
+			$"cavityVertices={geometryMetrics.CavityVertexCount}, cavityTriangles={geometryMetrics.CavityTriangleCount}, " +
+			$"entryExitDistance={exitDistance:F3}m, queueMs={queueMilliseconds:F2}, materialMs={materialMilliseconds:F2}, " +
+			$"bakeMs={bakeMilliseconds:F2}, rayMs={rayMilliseconds:F2}, acquisitionMs={acquisitionMilliseconds:F2}, " +
+			$"classificationMs={geometryMetrics.TriangleClassificationMilliseconds:F2}, cavityGenerationMs={geometryMetrics.CavityGenerationMilliseconds:F2}, " +
+			$"meshApplicationMs={meshApplicationMilliseconds:F2}, captureMainMs={build.CaptureMilliseconds:F2}, geometryWorkerMs={job.WorkerMilliseconds:F2}, validationWorkerMs={job.ValidationMilliseconds:F2}, applyMainMs={totalMilliseconds:F2}, endToEndMs={(Time.realtimeSinceStartup - work.QueuedAt) * 1000f:F2}.");
 	}
 
 	private static int FindMatchingHeadshot(EFT.Ballistics.Shot shot)

@@ -104,6 +104,17 @@ internal static class LimbDecalTextureTransfer
 		}
 	}
 
+	// A hidden replacement abandoned before commit is never handed to EFT's
+	// corpse cleanup. Release only its independently registered texture here.
+	internal static void ReleasePreparedTexture(Renderer renderer)
+	{
+		// A destroyed Unity renderer still identifies its dictionary registration.
+		if (ReferenceEquals(renderer, null) || !TryGetRendererTextures(out var textures, out _)) return;
+		if (!textures.TryGetValue(renderer, out var texture)) return;
+		textures.Remove(renderer);
+		if (texture != null) UnityEngine.Object.Destroy(texture);
+	}
+
 	internal static bool CanAcceptNativeDecal(Renderer renderer)
 	{
 		return BodyDecalRendering.CanPaint(renderer);

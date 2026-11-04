@@ -8,7 +8,7 @@ namespace Rupture.PhysXBackend;
 
 // Cached body/joint state and queued commands. Native handles remain owned by
 // the runtime scene; invalidating a wrapper does not release native resources.
-internal sealed class ExternalBody : IExternalPhysicsBody
+internal sealed class ExternalBody : IExternalPhysicsBody, IExternalColliderDebugBody
 {
 	private readonly ExternalPhysXRuntime _runtime;
 	private Vector3 _position, _velocity, _angularVelocity;
@@ -44,6 +44,8 @@ internal sealed class ExternalBody : IExternalPhysicsBody
 	public bool CollisionEnabled { get => _collisionEnabled; set { if (_collisionEnabled == value) return; _collisionEnabled = value; _runtime.QueueBodyCollision(this, value); } }
 	public bool IsSleeping => _sleeping;
 	public bool IsValid => _valid;
+	public bool TryGetColliderWireframe(out Vector3[] edges, out string failure) =>
+		_runtime.TryGetColliderWireframe(this, out edges, out failure);
 	public void WakeUp() { _sleeping = false; _runtime.QueueBodyState(this, true); }
 	public void AddForce(Vector3 force, ForceMode mode) => _runtime.QueueForce(this, 1, force, Vector3.zero, mode);
 	public void AddForceAtPosition(Vector3 force, Vector3 worldPosition, ForceMode mode) => _runtime.QueueForce(this, 2, force, worldPosition, mode);

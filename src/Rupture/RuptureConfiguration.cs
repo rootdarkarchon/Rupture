@@ -31,8 +31,12 @@ public static class RuptureConfiguration
 	public static ConfigEntry<int> RagdollSleepTime { get; private set; }
 	public static ConfigEntry<bool> LocalizedRagdollPhysics { get; private set; }
 	public static ConfigEntry<bool> WakeCorpsesOnImpact { get; private set; }
+	public static ConfigEntry<bool> CorrectedLethalImpulse { get; private set; }
+	public static ConfigEntry<bool> InheritRootVelocity { get; private set; }
+	public static ConfigEntry<bool> AngularResistance { get; private set; }
 	public static ConfigEntry<bool> ContinuouslySimulateShadowScene { get; private set; }
 	public static ConfigEntry<bool> FreezeCorpseRagdollsForWoundDebug { get; private set; }
+	public static ConfigEntry<bool> WeaponColliderWireframe { get; private set; }
 	public static ConfigEntry<bool> ProceduralLimbCutDebugOverlay { get; private set; }
 	public static ConfigEntry<bool> ProceduralLimbClothingCapture { get; private set; }
 	public static ConfigEntry<float> ProceduralLimbCutMainThreadBudget { get; private set; }
@@ -97,8 +101,15 @@ public static class RuptureConfiguration
 			null,
 			new ConfigurationManagerAttributes { IsAdvanced = true, Order = 3 }));
 
+		CorrectedLethalImpulse = config.Bind("Ragdolls | Death Reactions", "Corrected Lethal Impulse", true, new ConfigDescription(
+			"Both presets inherit movement velocity. New behavior uses one correlated lethal bullet impulse at projectile momentum (times Bullet Momentum Multiplier) and briefly resists joint rotation. Old behavior restores the amplified lethal impulse and passive joints. Applies to new deaths; other settings are preserved. Host synchronized.", null,
+			new ConfigurationManagerAttributes { IsAdvanced = false, Order = 100, DispName = "Death Reaction Presets", HideDefaultButton = true, CustomDrawer = DrawDeathReactions }));
+		InheritRootVelocity = config.Bind("Ragdolls | Death Reactions", "Inherit Movement Velocity", true, new ConfigDescription(
+			"Preserves finite root movement up to 15 m/s on first external handoff, including falling velocity. Never changes subsequent corpse hits. Host synchronized; applies to new deaths.", null, new ConfigurationManagerAttributes { IsAdvanced = true }));
+		AngularResistance = config.Bind("Ragdolls | Death Reactions", "Brief Angular Resistance", true, new ConfigDescription(
+			"Resists departure from the death pose with bounded joint torque fading to zero over 0.45 seconds of initial simulation. Does not continue animation or prolong corpse activity. Host synchronized; applies to new deaths.", null, new ConfigurationManagerAttributes { IsAdvanced = true }));
 		ShotIntensity = config.Bind("Ragdolls | Physical Properties", "Bullet Momentum Multiplier", 1f, new ConfigDescription(
-			"Multiplies RPT's visually amplified projectile momentum applied to a dynamic corpse.",
+			"Multiplies projectile momentum. Corrected lethal bullets use 1x presentation gain; legacy lethal fallback and subsequent corpse hits retain the amplified 4x gain.",
 			new AcceptableValueRange<float>(0f, 10f), new ConfigurationManagerAttributes { IsAdvanced = true }));
 		GrenadeExplIntensity = config.Bind("Ragdolls | Physical Properties", "Grenade Blast Multiplier", 1f, new ConfigDescription(
 			"Multiplies EFT grenade strength when applying a radial corpse impulse.",
@@ -131,6 +142,9 @@ public static class RuptureConfiguration
 			"Freezes newly created corpse ragdoll bodies at their death pose so procedural entry and exit wounds can be inspected. This affects only corpse ragdoll motion; wound generation, blood, looting, detached equipment and other physics remain active. Enable before creating the corpse.",
 			null,
 			new ConfigurationManagerAttributes { IsAdvanced = true, Order = 2 }));
+		WeaponColliderWireframe = config.Bind("Ragdolls | Debug", "Dropped Weapon Collider Wireframe", false, new ConfigDescription(
+			"Draws the actual cooked collider edges of Rupture-managed corpse weapons within 50 metres, through surfaces for inspection. Cyan: rounded convex hull. Yellow: box fallback. Labels show fitted dimensions in metres. Can be toggled during a raid, including for settled weapons. Local graphical diagnostic; does not require debug logging or change physics.",
+			null, new ConfigurationManagerAttributes { IsAdvanced = true, Order = 2 }));
 		ProceduralLimbCutDebugOverlay = config.Bind("Dismemberment | Debug", "Procedural Limb Cut Overlay", false, new ConfigDescription(
 			"Creates a skinned diagnostic overlay for procedural limb cuts and performs a one-shot EFT decal audit around each cut. The audit logs exact seam UVs, renderer/material bindings, painter queue entries, before/after GPU texture hashes, and immutable/current/prepared/baked mesh vertex layouts including UV0-UV7, color, and bone-weight summaries; its synchronous texture readback has debug-only cost. Green is strongly target-limb weighted, red is selected only through mesh connectivity, yellow is a nearby capsule candidate that was rejected, and cyan crosses a cut-band plane. Enable before making the cut; it can be hidden again live.",
 			null,
@@ -139,7 +153,7 @@ public static class RuptureConfiguration
 			"Captures distinct successful and failed clothing cuts under BepInEx/diagnostics/Rupture/LimbCuts. Includes bind meshes, weights, selection, exposed edges and loops. Exports on a separate bounded background writer without delaying cut commit or GPU readback; up to four outstanding exports, with excess captures explicitly skipped; limited to 64 successful and 64 failed cases per raid with a 128 MiB soft disk limit. Repeated cases log a stable ID and repeat count. Does not require the overlay.",
 			null, new ConfigurationManagerAttributes { IsAdvanced = true, Order = 2 }));
 		ProceduralLimbCutMainThreadBudget = config.Bind("Dismemberment | Performance", "Procedural Limb Cut Main Thread Budget (ms)", 2f, new ConfigDescription(
-			"Soft main-thread time budget per limb-cut update. Several stages may run within the budget, but at most one cut commits per update. Expensive native operations remain atomic and may exceed the budget.",
+			"Shared soft main-thread time budget for procedural head wounds and limb cuts per frame. Both pipelines charge the same allowance and alternate first access. Preparation and uploads advance in stages; each pipeline commits at most one cut per update. Expensive native operations remain atomic and may exceed the budget.",
 			new AcceptableValueRange<float>(0.5f, 8f),
 			new ConfigurationManagerAttributes { IsAdvanced = true, Order = 2 }));
 		LogShadowSceneStatusEverySecond = config.Bind("Ragdolls | Debug", "Log Shadow Scene Status Every Second", false, new ConfigDescription(
@@ -155,11 +169,38 @@ public static class RuptureConfiguration
 		_synced = new ConfigEntryBase[] { EnableDismemberment, EnableBloodEffects,
 			KillshotStreamDuration, DismembermentStreamDuration, MaxDecals, ShotIntensity,
 			GrenadeExplIntensity, RagdollSleepTime, LocalizedRagdollPhysics, WakeCorpsesOnImpact,
-			DismembermentMomentumThreshold, AutomaticHeadgearDetachment, LivingBotLegSevering, LivingLegMomentumThreshold, LivingLegSeveringSpecialAI, LivingLegSeveringExplosionsOnly };
+			DismembermentMomentumThreshold, AutomaticHeadgearDetachment, LivingBotLegSevering, LivingLegMomentumThreshold, LivingLegSeveringSpecialAI, LivingLegSeveringExplosionsOnly,
+			CorrectedLethalImpulse, InheritRootVelocity, AngularResistance };
 		_config.SettingChanged += Changed;
 	}
 
-	internal const int SynchronizedCount = 16;
+	internal const int SynchronizedCount = 19;
+	internal static void SetDeathReactionPreset(bool modern)
+	{
+		if (_config == null || _hostValues != null) return;
+		object[] values = _synced.Select(entry => entry.BoxedValue).ToArray();
+		values[16] = values[18] = modern;
+		values[17] = true; // Movement inheritance is shared by both presets.
+		Assign(values);
+		_config.Save();
+		ImpactNetwork.ConfigurationChanged();
+	}
+	private static void DrawDeathReactions(ConfigEntryBase entry)
+	{
+		bool enabled = UnityEngine.GUI.enabled;
+		UnityEngine.GUI.enabled = enabled && _hostValues == null;
+		try
+		{
+			UnityEngine.GUILayout.BeginHorizontal();
+			if (UnityEngine.GUILayout.Button("Old behavior")) SetDeathReactionPreset(false);
+			if (UnityEngine.GUILayout.Button("New behavior")) SetDeathReactionPreset(true);
+			UnityEngine.GUILayout.EndHorizontal();
+			bool modern = CorrectedLethalImpulse.Value && InheritRootVelocity.Value && AngularResistance.Value;
+			bool old = !CorrectedLethalImpulse.Value && InheritRootVelocity.Value && !AngularResistance.Value;
+			UnityEngine.GUILayout.Label((_hostValues != null ? "Host controlled: " : "") + (modern ? "New behavior" : old ? "Old behavior" : "Custom") + " (new deaths)");
+		}
+		finally { UnityEngine.GUI.enabled = enabled; }
+	}
 	private static ConfigFile _config;
 	private static ConfigEntryBase[] _synced = Array.Empty<ConfigEntryBase>();
 	private static object[] _localValues, _hostValues;

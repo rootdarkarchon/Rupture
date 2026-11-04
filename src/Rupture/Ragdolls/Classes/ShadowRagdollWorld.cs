@@ -207,6 +207,8 @@ internal static partial class ShadowRagdollWorld
 		internal bool UsesCustomRoundedBox;
 		internal Vector3 CustomBoxCenter;
 		internal Vector3 CustomBoxSize;
+		internal Vector3[] DebugColliderEdges;
+		internal bool DebugColliderAttempted;
 		internal ShadowBody ParkedAnchor;
 		internal Vector3 ParkedLocalPosition;
 		internal Quaternion ParkedLocalRotation = Quaternion.identity;
@@ -402,6 +404,7 @@ internal static partial class ShadowRagdollWorld
 			DispatcherThreads = Mathf.Clamp(RuptureConfiguration.ExternalPhysXDispatcherThreads?.Value ?? 2, 0, 4),
 			DeadbodyLayer = deadbodyLayer,
 			EnvironmentMask = BuildEnvironmentMask(),
+			ScheduleBootstrapProbe = PhysicsBootstrapProbeLease.TrySchedule,
 			EftBuild = Application.version,
 			Log = (level, message) =>
 			{
@@ -713,6 +716,8 @@ internal static partial class ShadowRagdollWorld
 			DriveDragLeases(deltaTime);
 			ProcessDragBoundary(); // dispose a failed drive before another step can pull it
 			using (TraceMainThread(MainThreadStage.CasingsPrepare)) _prepareLocalSimulation?.Invoke(_externalRuntime);
+			RootVelocityExperiment.BeforeExternalStep();
+			AngularDriveExperiment.BeforeExternalStep();
 			long submitStarted = BeginTiming();
 			bool submitted = _externalRuntime.SubmitStep(deltaTime, out string submitFailure);
 			RecordTiming(ExternalSubmitTiming, submitStarted);
@@ -722,6 +727,9 @@ internal static partial class ShadowRagdollWorld
 				return;
 			}
 			_submittedExternalSimulationDelta = deltaTime;
+			LethalImpulseExperiment.ExternalStepSubmitted();
+			RootVelocityExperiment.ExternalStepSubmitted();
+			AngularDriveExperiment.ExternalStepSubmitted();
 			_externalStepSubmitted = true;
 			return;
 		}
@@ -742,6 +750,9 @@ internal static partial class ShadowRagdollWorld
 			return true;
 		}
 		_externalStepSubmitted = false;
+		LethalImpulseExperiment.ExternalStepCompleted();
+		RootVelocityExperiment.ExternalStepCompleted();
+		AngularDriveExperiment.ExternalStepCompleted();
 		RecordMainThreadWork(MainThreadWork.ExternalBodiesPublished, result.PublishedBodies);
 		RecordMainThreadWork(MainThreadWork.ExternalSleepingBodiesSkipped, result.UnchangedBodies);
 		using (TraceMainThread(MainThreadStage.CasingsPrepare)) _receiveLocalSimulation?.Invoke(_externalRuntime);
@@ -951,6 +962,7 @@ internal static partial class ShadowRagdollWorld
 
 	internal static void Reset()
 	{
+		LethalImpulseExperiment.Reset();
 		ResetLivingFalls();
 		ResetDragLeases();
 		_resetLocalSimulation?.Invoke();
@@ -1085,6 +1097,72 @@ internal static partial class ShadowRagdollWorld
 		if (nativeBody == null || nativeBody.isKinematic) return false;
 		nativeBody.AddForceAtPosition(impulse, worldPoint, ForceMode.Impulse);
 		return true;
+	}
+
+	internal static bool TryApplyLethalExperimentImpulse(Corpse corpse, Rigidbody nativeBody, Vector3 impulse, Vector3 point)
+	{
+		if (!IsFinite(impulse) || !IsFinite(point) || !HasActiveLethalExperimentBody(corpse, nativeBody)) return false;
+		ShadowBody body = BodiesByNative[nativeBody];
+		body.Proxy.AddForceAtPosition(impulse, point, ForceMode.Impulse);
+		return true;
+	}
+
+	// Scene-owner boundary only. Validate the entire retained core before writing
+	// any velocity. Independent weapons, gibs and removed limbs are never included.
+	internal static bool TryAdjustRootVelocity(EFT.Interactive.CorpseRagdoll ragdoll, Vector3 delta, bool apply,
+		out int count, out Vector3 before, out Vector3 after, out string reason)
+	{
+		count = 0; before = after = Vector3.zero; reason = "inactive-or-invalid-core";
+		if (ragdoll == null || !IsFinite(delta) || !RigsByRagdoll.TryGetValue(ragdoll, out ShadowRig rig) ||
+			!rig.Active || !rig.Committed || rig.CoreBodies.Count == 0 || rig.CoreBodies.Count > 32) return false;
+		foreach (ShadowBody body in rig.CoreBodies)
+		{
+			if (rig.PermanentlyDisabledBodies.Contains(body)) continue;
+			if (body?.Native == null || body.Proxy is not ExternalShadowBodyProxy external || !external.ExternalBody.IsValid || body.Proxy.isKinematic ||
+				!body.CountsForSleep || !IsFinite(body.Proxy.velocity) || !IsFinite(body.Proxy.velocity + delta)) return false;
+			count++;
+			before += body.Proxy.velocity;
+		}
+		if (count == 0) return false;
+		before /= count; after = before;
+		try
+		{
+			int index = 0;
+			foreach (ShadowBody body in rig.CoreBodies)
+			{
+				if (rig.PermanentlyDisabledBodies.Contains(body)) continue;
+				RootVelocityBodies[index] = body.Proxy;
+				RootVelocityBefore[index++] = body.Proxy.velocity;
+			}
+			if (apply && delta != Vector3.zero)
+			{
+				for (int i = 0; i < count; i++) RootVelocityBodies[i].velocity = RootVelocityBefore[i] + delta;
+				after += delta;
+			}
+			reason = "ok"; return true;
+		}
+		catch (Exception exception)
+		{
+			for (int i = 0; i < count; i++)
+				try { RootVelocityBodies[i].velocity = RootVelocityBefore[i]; }
+				catch (Exception rollback) { RupturePlugin.Log.LogWarning("RPT velocity rollback unavailable: " + rollback); }
+			reason = "velocity-write-failed: " + exception.GetType().Name; return false;
+		}
+		finally { Array.Clear(RootVelocityBodies, 0, RootVelocityBodies.Length); }
+	}
+	private static readonly IShadowBodyProxy[] RootVelocityBodies = new IShadowBodyProxy[32];
+	private static readonly Vector3[] RootVelocityBefore = new Vector3[32];
+
+	internal static bool HasActiveLethalExperimentBody(Corpse corpse, Rigidbody nativeBody) =>
+		corpse != null && nativeBody != null && BodiesByNative.TryGetValue(nativeBody, out ShadowBody body) &&
+		body.Rig?.Corpse == corpse && body.Rig.Active && !body.Rig.PermanentlyDisabledBodies.Contains(body) &&
+		body.CountsForSleep && body.Proxy is ExternalShadowBodyProxy external && external.ExternalBody.IsValid && !body.Proxy.isKinematic;
+
+	internal static bool TryReadLethalExperimentMotion(Rigidbody nativeBody, out Vector3 velocity, out Vector3 angular)
+	{
+		velocity = angular = Vector3.zero;
+		if (nativeBody == null || !BodiesByNative.TryGetValue(nativeBody, out ShadowBody body) || body.Proxy == null) return false;
+		velocity = body.Proxy.velocity; angular = body.Proxy.angularVelocity; return true;
 	}
 
 	internal static bool TryCaptureMotionSnapshot(Corpse corpse, out RagdollPose[] poses)
@@ -2345,10 +2423,12 @@ internal static partial class ShadowRagdollWorld
 			if (pending.Ragdoll._isPhysicsDone) continue;
 			if (!TryBuild(pending.Ragdoll, out string failure))
 			{
+				LethalImpulseExperiment.Admission(pending.Ragdoll, false);
 				_buildFailures++;
 				ApplyPendingColliderDisableToNative(pending.Ragdoll);
 				RupturePlugin.Log.LogWarning($"Shadow ragdoll was not installed for {GetCorpseName(pending.Ragdoll)}; EFT native physics remains active. {failure}");
 			}
+			else LethalImpulseExperiment.Admission(pending.Ragdoll, true);
 		}
 	}
 
@@ -2952,6 +3032,7 @@ internal static partial class ShadowRagdollWorld
 			foreach (ShadowBody body in rig.Bodies)
 			{
 				BodiesByNative[body.Native] = body;
+				LethalImpulseExperiment.CaptureAdmissionMotion(ragdoll, body.Native, body.NativeVelocity, body.NativeAngularVelocity);
 				body.NativeHandedOff = true;
 				for (int supportIndex = 0; supportIndex < body.NativeSupportCount; supportIndex++)
 				{
@@ -3046,7 +3127,7 @@ internal static partial class ShadowRagdollWorld
 			return false;
 		}
 		ExternalRoundedBoxShape weaponRoundedBox = isWeapon
-			? new ExternalRoundedBoxShape(weaponBox.Center, weaponBox.Size, weaponBox.Material, weaponBox.ContactOffset)
+			? new ExternalRoundedBoxShape(weaponBox.Center, weaponBox.Size, weaponBox.Rotation, weaponBox.Material, weaponBox.ContactOffset)
 			: null;
 
 		IExternalPhysicsBody externalBody;
@@ -3121,8 +3202,9 @@ internal static partial class ShadowRagdollWorld
 		foreach (EFT.AssetsManager.AmmoPoolObject ammo in body.GetComponentsInChildren<EFT.AssetsManager.AmmoPoolObject>(true))
 			excludedRoots.Add(ammo.transform);
 		int shellsLayer = LayerMask.NameToLayer("Shells");
-		bool fitted = WeaponColliderGeometry.TryFit(body, sourceColliders, out Bounds bounds, excludedRoots, shellsLayer);
-		AuditWeaponColliders(body, sourceColliders, excludedRoots, shellsLayer, profile, fitted, bounds);
+		bool fitted = WeaponColliderGeometry.TryFitOriented(body, sourceColliders, out var fit, excludedRoots, shellsLayer);
+		Bounds bounds = new Bounds(fit.Center, fit.Size);
+		AuditWeaponColliders(body, sourceColliders, excludedRoots, shellsLayer, profile, fitted, bounds, fit.Rotation);
 		if (!fitted || !ValidWeaponBoxSize(bounds.size))
 		{
 			failure = $"weapon {body.name} has unsupported or invalid native collider geometry";
@@ -3142,19 +3224,19 @@ internal static partial class ShadowRagdollWorld
 		paddedSize.x = Mathf.Max(0.04f, paddedSize.x);
 		paddedSize.y = Mathf.Max(0.04f, paddedSize.y);
 		paddedSize.z = Mathf.Max(0.04f, paddedSize.z);
-		box = new ExternalBoxShape(bounds.center, paddedSize, material, contactOffset);
+		box = new ExternalBoxShape(bounds.center, paddedSize, fit.Rotation, material, contactOffset);
 		return true;
 	}
 
 	private static void AuditWeaponColliders(Rigidbody body, IReadOnlyList<Collider> colliders,
-		IReadOnlyList<Transform> excludedRoots, int shellsLayer, string profile, bool fitted, Bounds bounds)
+		IReadOnlyList<Transform> excludedRoots, int shellsLayer, string profile, bool fitted, Bounds bounds, Quaternion fitRotation)
 	{
 		if (RupturePlugin.Log?.IsDebugEnabled != true || _weaponColliderAudits >= 24) return;
 		int audit = ++_weaponColliderAudits;
 		RupturePlugin.Log.LogDebug($"RPT weapon collider audit {audit}: profile={profile}, weapon={body.name}, " +
 			$"bodyRotation={FormatVector(body.transform.eulerAngles)}, bodyScale={FormatVector(body.transform.lossyScale)}, " +
 			$"colliders={colliders.Count}, excludedRoots={excludedRoots.Count}, fitted={fitted}, " +
-			$"unpaddedCenter={FormatVector(bounds.center)}, unpaddedSize={FormatVector(bounds.size)}, omitted={Math.Max(0, colliders.Count - 32)}.");
+			$"fitFrame=unscaled-actor, fitRotation={FormatVector(fitRotation.eulerAngles)}, unpaddedCenter={FormatVector(bounds.center)}, unpaddedSize={FormatVector(bounds.size)}, omitted={Math.Max(0, colliders.Count - 32)}.");
 		for (int i = 0; i < Math.Min(32, colliders.Count); i++)
 		{
 			Collider collider = colliders[i];
@@ -3815,6 +3897,7 @@ internal static partial class ShadowRagdollWorld
 		{
 			return;
 		}
+		AngularDriveExperiment.End(rig.NativeRagdoll, "dormancy");
 		SyncNativeFromProxy(rig);
 		foreach (ShadowBody body in rig.Bodies)
 		{
@@ -3960,6 +4043,7 @@ internal static partial class ShadowRagdollWorld
 		{
 			return;
 		}
+		LethalImpulseExperiment.End(rig.NativeRagdoll, "settlement");
 		SyncNativeFromProxy(rig);
 		foreach (ShadowBody body in rig.Bodies)
 		{
@@ -4169,6 +4253,7 @@ internal static partial class ShadowRagdollWorld
 				BodiesByNative.Remove(body.Native);
 			}
 		}
+		LethalImpulseExperiment.End(rig.NativeRagdoll, "rig-destroyed");
 		if (rig.Root != null)
 		{
 			rig.Root.SetActive(false);

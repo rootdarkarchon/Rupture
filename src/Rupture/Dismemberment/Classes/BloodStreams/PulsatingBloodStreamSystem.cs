@@ -653,7 +653,7 @@ internal static partial class PulsatingBloodStreamSystem
 		int restored = 0;
 		foreach (LivingStream stream in LivingStreams.Values)
 		{
-			if (stream.Player == null || FindActive(stream.Descriptor.StreamId) >= 0) continue;
+			if (stream.Player == null || !CanStartStream(stream.Descriptor, stream.Player) || FindActive(stream.Descriptor.StreamId) >= 0) continue;
 			// Recover evicted visuals only into free slots: never churn a full pool.
 			bool free = false; foreach (StreamEmitter emitter in Emitters) if (!emitter.Active) { free = true; break; }
 			if (!free || restored >= 4) break;
@@ -711,8 +711,15 @@ internal static partial class PulsatingBloodStreamSystem
 		};
 	}
 
+	private static bool CanStartStream(BloodStreamData descriptor, Player player)
+	{
+		return descriptor.TriggerKind != BloodStreamTriggerKind.HeavyWound ||
+			descriptor.BodyPart != EBodyPart.Head || !MultiplayerRuntime.Current.IsHumanPlayer(player);
+	}
+
 	private static void StartOrReplace(BloodStreamData descriptor, Player player, Transform anchor, bool localFracture = false)
 	{
+		if (!CanStartStream(descriptor, player)) return;
 		int existing = FindActive(descriptor.StreamId);
 		if (existing >= 0)
 		{

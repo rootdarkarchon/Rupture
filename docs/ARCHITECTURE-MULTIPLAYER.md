@@ -27,9 +27,9 @@ Core owns injury policy consumers, procedural rendering and corpse state. The op
 
 ## Handshake, protocol and configuration
 
-[FikaImpactNetwork](../src/Rupture.Fika/Impacts/FikaImpactNetwork.cs) defines **protocol 14** and exact release string **`1.2.2`**. Each network session uses a 32-character GUID session string. Hello exchange is reliable/ordered with a 15-second deadline. Protocol/release mismatch, malformed session, or changing a session without reconnect is rejected. This wire check is separate from adapter assembly-version and native ABI checks. The current hello includes a headless requester declaration and the configuration snapshot; living bot injuries use their own bounded packets. The damage envelope embeds the separate victim network ID followed by Fika 2.4.4's readonly `DamagePacket` serialization. The [frozen fixture guide](../tests/Rupture.RegressionTests/Fixtures/README.md) distinguishes historical payload coverage from current protocol tests.
+[FikaImpactNetwork](../src/Rupture.Fika/Impacts/FikaImpactNetwork.cs) defines **protocol 15** and exact release string **`1.3.1`**. Each network session uses a 32-character GUID session string. Hello exchange is reliable/ordered with a 15-second deadline. Protocol/release mismatch, malformed session, or changing a session without reconnect is rejected. This wire check is separate from adapter assembly-version and native ABI checks. The current hello includes a headless requester declaration and the configuration snapshot; living bot injuries use their own bounded packets. The damage envelope embeds the separate victim network ID followed by Fika 2.4.4's readonly `DamagePacket` serialization. The [frozen fixture guide](../tests/Rupture.RegressionTests/Fixtures/README.md) distinguishes historical payload coverage from current protocol tests.
 
-The authority's configuration snapshot has a positive revision and exactly sixteen validated serialized values, in this order:
+The authority's configuration snapshot has a positive revision and exactly nineteen validated serialized values, in this order:
 
 1. `EnableDismemberment`
 2. `EnableBloodEffects`
@@ -47,6 +47,9 @@ The authority's configuration snapshot has a positive revision and exactly sixte
 14. `LivingLegMomentumThreshold`
 15. `LivingLegSeveringSpecialAI`
 16. `LivingLegSeveringExplosionsOnly`
+17. `CorrectedLethalImpulse`
+18. `InheritRootVelocity`
+19. `AngularResistance`
 
 [RuptureConfiguration](../src/Rupture/RuptureConfiguration.cs) parses and validates the whole snapshot before assigning anything. Nonfinite numeric values, invalid ranges, length/type errors and malformed snapshots cannot partially override a client. Revisions order subsequent authority updates. Local preferences are saved separately from in-memory overrides and restored on network reset. Casing settings, debug settings, geometry scheduling budget, external environment mode and dispatcher threads remain machine-local.
 

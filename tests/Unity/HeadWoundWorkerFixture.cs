@@ -45,7 +45,13 @@ namespace Rupture
     public class FixtureConfig { public bool Value; }
     public static class RuptureConfiguration { public static FixtureConfig EnableDismemberment = new FixtureConfig(), EnableBloodEffects = new FixtureConfig(), AutomaticHeadgearDetachment = new FixtureConfig(); }
     public static class RupturePlugin { public static FixtureLog Log = new FixtureLog(); }
-    public class FixtureLog { public bool IsDebugEnabled; public void LogInfo(string s) { } public void LogWarning(string s) { } }
+    public class FixtureLog
+    {
+        public bool IsDebugEnabled;
+        public readonly List<string> Infos = new List<string>();
+        public void LogInfo(string s) { if (IsDebugEnabled) Infos.Add(s); }
+        public void LogWarning(string s) { }
+    }
     public static class MultiplayerRuntime { public static FixtureRuntime Current = new FixtureRuntime(); }
     public class FixtureRuntime { public bool IsHeadless, HasServer; public void Send(ref HeadWoundData data) { } }
 }
@@ -86,7 +92,14 @@ namespace Rupture.Dismemberment.Classes.Limbs
     public static class LimbDecalTextureTransfer
     {
         public static bool CanAcceptNativeDecal(Renderer r) => false;
-        public static void CopyExisting(Renderer source, Renderer dest, out int count) { count = 0; }
+        public static bool FailCopy;
+        public static readonly HashSet<Renderer> Prepared = new HashSet<Renderer>();
+        public static void CopyExisting(Renderer source, Renderer dest, out int count)
+        {
+            if (FailCopy) throw new InvalidOperationException("injected decal preparation failure");
+            count = 0; dest.sharedMaterial = new Material(dest.sharedMaterial); Prepared.Add(dest);
+        }
+        public static void ReleasePreparedTexture(Renderer renderer) { Prepared.Remove(renderer); }
     }
 }
 namespace Rupture.Dismemberment.Classes.BloodStreams
@@ -105,7 +118,8 @@ namespace Rupture.Dismemberment.Classes.HeadWounds
     internal static class HeadWoundMaterialProvider
     {
         internal static Material Material;
-        internal static bool TryGet(out Material material, out string failure) { material = Material; failure = null; return material != null; }
+        internal static int Calls;
+        internal static bool TryGet(out Material material, out string failure) { Calls++; material = Material; failure = null; return material != null; }
         internal static void Reset() { }
     }
 }

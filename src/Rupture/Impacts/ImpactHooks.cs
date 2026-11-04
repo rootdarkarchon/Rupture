@@ -30,15 +30,22 @@ internal static class ImpactHooks
     }
     internal static void Shutdown() => Patches.UnpatchSelf();
     private static HarmonyMethod Method(string name) => new HarmonyMethod(typeof(ImpactHooks), name);
-    internal static void ShotPrefix(EFT.Ballistics.Shot shotResult, out ImpactData __state)
+    internal struct ShotScope
     {
-        __state = ImpactStateService.Current;
+        internal ImpactData Impact;
+        internal Rupture.Ragdolls.Classes.LethalImpulseExperiment.ShotContext Lethal;
+    }
+    internal static void ShotPrefix(EFT.Ballistics.Shot shotResult, out ShotScope __state)
+    {
+        __state = new ShotScope { Impact = ImpactStateService.Current };
         ImpactStateService.Current = ImpactData.Capture(shotResult);
+        __state.Lethal = Rupture.Ragdolls.Classes.LethalImpulseExperiment.EnterShot(shotResult, ImpactStateService.Current);
         ImpactStateService.CorpseImpact(shotResult, ImpactStateService.Current);
     }
-    internal static Exception ShotFinally(Exception __exception, ImpactData __state)
+    internal static Exception ShotFinally(Exception __exception, ShotScope __state)
     {
-        ImpactStateService.Current = __state;
+        ImpactStateService.Current = __state.Impact;
+        Rupture.Ragdolls.Classes.LethalImpulseExperiment.RestoreShot(__state.Lethal);
         return __exception;
     }
     private static void DamagePrefix(ActiveHealthController __instance, EBodyPart bodyPart, out float __state) =>
@@ -60,8 +67,10 @@ internal static class ImpactHooks
         __state = Health.BotSeverStateService.Leg(bodyPart) >= 0 ? __instance.GetBodyPartHealth(bodyPart, false).Current : float.NaN;
     private static void HealPostfix(ActiveHealthController __instance, EBodyPart bodyPart, float value, float __state) =>
         ImpactStateService.Healed(__instance, bodyPart, value, __state);
-    private static void DeathPrefix(Player __instance, EDamageType damageType)
+    private static void DeathPrefix(Player __instance, EDamageType damageType, EFT.Ballistics.DamageInfo ___LastDamageInfo)
     {
+        if (damageType == EDamageType.Bullet)
+            Rupture.Ragdolls.Classes.LethalImpulseExperiment.Death(__instance, ___LastDamageInfo, ImpactStateService.Current);
         Health.BotSeverStateService.Death(__instance);
         ImpactStateService.QueueDeath(__instance, damageType);
     }

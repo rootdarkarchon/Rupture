@@ -29,6 +29,7 @@ public class KillPatch : ModulePatch
 
 	internal static void ProcessDeath(Player __instance, EFT.Ballistics.DamageInfo damageInfo, EBodyPart bodyPartType)
 	{
+		LethalImpulseExperiment.Death(__instance, damageInfo, ImpactStateService.Current, allowCreate: false);
 		RagdollCoordinator.RegisterDeath(__instance, damageInfo, bodyPartType, out _);
 		PulsatingBloodStreamSystem.StopLivingStreams(__instance, publish: true);
 		if (!LimbImpactPolicy.Positive(damageInfo.Damage)) return;

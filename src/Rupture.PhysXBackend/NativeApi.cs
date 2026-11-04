@@ -44,8 +44,11 @@ internal sealed class NativeApi : IDisposable
 	internal readonly SetActorPoseDelegate SetActorPose;
 	internal readonly SetActorStateDelegate SetActorState;
 	internal readonly SetShapeEnabledDelegate SetShapeEnabled;
+	internal readonly GetShapeWireframeDelegate GetShapeWireframe;
 	internal readonly IgnoreShapePairDelegate IgnoreShapePair;
 	internal readonly CreateD6JointDelegate CreateD6Joint;
+	internal readonly SetD6DrivesDelegate SetD6Drives;
+	internal readonly GetD6DrivesDelegate GetD6Drives;
 	internal readonly CreateFixedJointDelegate CreateFixedJoint;
 	internal readonly CreateDistanceJointDelegate CreateDistanceJoint;
 	internal readonly ApplyForcesDelegate ApplyForces;
@@ -94,8 +97,11 @@ internal sealed class NativeApi : IDisposable
 		SetActorPose = Load<SetActorPoseDelegate>("rptpx_set_actor_pose");
 		SetActorState = Load<SetActorStateDelegate>("rptpx_set_actor_state");
 		SetShapeEnabled = Load<SetShapeEnabledDelegate>("rptpx_set_shape_enabled");
+		GetShapeWireframe = TryLoad<GetShapeWireframeDelegate>("rptpx_get_shape_wireframe");
 		IgnoreShapePair = Load<IgnoreShapePairDelegate>("rptpx_ignore_shape_pair");
 		CreateD6Joint = Load<CreateD6JointDelegate>("rptpx_create_d6_joint");
+		SetD6Drives = TryLoad<SetD6DrivesDelegate>("rptpx_set_d6_drives");
+		GetD6Drives = TryLoad<GetD6DrivesDelegate>("rptpx_get_d6_drives");
 		CreateFixedJoint = Load<CreateFixedJointDelegate>("rptpx_create_fixed_joint");
 		CreateDistanceJoint = Load<CreateDistanceJointDelegate>("rptpx_create_distance_joint");
 		ApplyForces = Load<ApplyForcesDelegate>("rptpx_apply_forces");
@@ -140,6 +146,11 @@ internal sealed class NativeApi : IDisposable
 		}
 	}
 
+	private T TryLoad<T>(string name) where T : Delegate
+	{
+		IntPtr export = GetProcAddress(_module, name);
+		return export == IntPtr.Zero ? null : Marshal.GetDelegateForFunctionPointer<T>(export);
+	}
 	private T Load<T>(string name) where T : Delegate
 	{
 		IntPtr export = GetProcAddress(_module, name);
@@ -183,8 +194,21 @@ internal sealed class NativeApi : IDisposable
 	[UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate int SetActorPoseDelegate(IntPtr scene, ulong actor, ref Pose pose, uint kinematicTarget);
 	[UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate int SetActorStateDelegate(IntPtr scene, ulong actor, ref BodyState state, uint kinematic, uint wake);
 	[UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate int SetShapeEnabledDelegate(IntPtr scene, ulong shape, uint enabled);
+	[UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate int GetShapeWireframeDelegate(IntPtr scene, ulong shape, [Out] Vec3[] edges, uint capacity, out uint required);
 	[UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate int IgnoreShapePairDelegate(IntPtr scene, ulong shape0, ulong shape1);
 	[UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate int CreateD6JointDelegate(IntPtr scene, ref D6JointDesc desc, out ulong joint);
+	[UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate int SetD6DrivesDelegate(IntPtr scene, [In] AngularDriveCommand[] commands, uint count);
+	[UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate int GetD6DrivesDelegate(IntPtr scene, [In, Out] AngularDriveState[] states, uint count);
+	[StructLayout(LayoutKind.Sequential)] internal struct AngularDriveCommand
+	{
+		internal uint StructSize; internal ulong Joint; internal Quat ParentToChild;
+		internal float Stiffness, Damping, TorquePerRow, Duration;
+	}
+	[StructLayout(LayoutKind.Sequential)] internal struct AngularDriveState
+	{
+		internal uint StructSize, Active; internal ulong Joint;
+		internal float Stiffness, Damping, TorquePerRow, Remaining;
+	}
 	[UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate int CreateFixedJointDelegate(IntPtr scene, ref FixedJointDesc desc, out ulong joint);
 	[UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate int CreateDistanceJointDelegate(IntPtr scene, ref DistanceJointDesc desc, out ulong joint);
 	[UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate int ApplyForcesDelegate(IntPtr scene, [In] ForceCommand[] commands, uint count);

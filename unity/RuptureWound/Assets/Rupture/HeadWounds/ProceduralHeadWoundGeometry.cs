@@ -325,62 +325,68 @@ internal sealed partial class ProceduralHeadWoundWorkspace
 	internal bool AcquireFromMeshOnMainThread(Mesh mesh, out string failure)
 	{
 		failure = null;
-		if (mesh == null || !mesh.isReadable || mesh.vertexCount < 3 || mesh.subMeshCount < 1)
-		{
-			failure = "source head mesh is missing, unreadable, or empty";
-			return false;
-		}
+		if (!AcquireFromMeshPartOnMainThread(mesh, 0, out failure)) return false;
+		for (int part = 1; part < SourceAcquisitionPartCount; part++)
+			if (!AcquireFromMeshPartOnMainThread(mesh, part, out failure)) return false;
+		return true;
+	}
 
-		EnsureSubmeshCapacity(mesh.subMeshCount);
-		SourceVertices.Clear();
-		mesh.GetVertices(SourceVertices);
-		if (SourceVertices.Count != mesh.vertexCount)
+	internal int SourceAcquisitionPartCount => 14 + _sourceSubmeshes.Length;
+
+	internal bool AcquireFromMeshPartOnMainThread(Mesh mesh, int part, out string failure)
+	{
+		failure = null;
+		if (part == 0)
 		{
-			failure = "source head vertex acquisition was incomplete";
-			return false;
+			if (mesh == null || !mesh.isReadable || mesh.vertexCount < 3 || mesh.subMeshCount < 1)
+			{ failure = "source head mesh is missing, unreadable, or empty"; return false; }
+			EnsureSubmeshCapacity(mesh.subMeshCount);
+			SourceVertices.Clear(); mesh.GetVertices(SourceVertices);
+			if (SourceVertices.Count != mesh.vertexCount)
+			{ failure = "source head vertex acquisition was incomplete"; return false; }
+			BaseVertexCount = SourceVertices.Count;
 		}
-		BaseVertexCount = SourceVertices.Count;
-		SourceNormals.Clear();
-		mesh.GetNormals(SourceNormals);
-		if (SourceNormals.Count != BaseVertexCount) SourceNormals.Clear();
-		SourceTangents.Clear();
-		mesh.GetTangents(SourceTangents);
-		if (SourceTangents.Count != BaseVertexCount) SourceTangents.Clear();
-		SourceColors.Clear();
-		mesh.GetColors(SourceColors);
-		if (SourceColors.Count != BaseVertexCount) SourceColors.Clear();
-		SourceBoneWeights.Clear();
-		BoneWeight[] boneWeights = mesh.boneWeights;
-		if (boneWeights != null && boneWeights.Length == BaseVertexCount) SourceBoneWeights.AddRange(boneWeights);
-		for (int channel = 0; channel < SourceUvs.Length; channel++)
+		else if (part == 1)
 		{
-			SourceUvs[channel].Clear();
-			mesh.GetUVs(channel, SourceUvs[channel]);
+			SourceNormals.Clear(); mesh.GetNormals(SourceNormals);
+			if (SourceNormals.Count != BaseVertexCount) SourceNormals.Clear();
+		}
+		else if (part == 2)
+		{
+			SourceTangents.Clear(); mesh.GetTangents(SourceTangents);
+			if (SourceTangents.Count != BaseVertexCount) SourceTangents.Clear();
+		}
+		else if (part == 3)
+		{
+			SourceColors.Clear(); mesh.GetColors(SourceColors);
+			if (SourceColors.Count != BaseVertexCount) SourceColors.Clear();
+		}
+		else if (part == 4)
+		{
+			SourceBoneWeights.Clear(); var boneWeights = mesh.boneWeights;
+			if (boneWeights != null && boneWeights.Length == BaseVertexCount) SourceBoneWeights.AddRange(boneWeights);
+		}
+		else if (part >= 5 && part < 13)
+		{
+			int channel = part - 5; SourceUvs[channel].Clear(); mesh.GetUVs(channel, SourceUvs[channel]);
 			if (SourceUvs[channel].Count != BaseVertexCount) SourceUvs[channel].Clear();
 		}
-
-		for (int submesh = 0; submesh < mesh.subMeshCount; submesh++)
+		else if (part >= 13 && part < SourceAcquisitionPartCount - 1)
 		{
+			int submesh = part - 13;
 			if (mesh.GetTopology(submesh) != MeshTopology.Triangles)
-			{
-				failure = $"source head submesh {submesh} is not triangle topology";
-				return false;
-			}
-			List<int> source = _sourceSubmeshes[submesh];
-			source.Clear();
+			{ failure = $"source head submesh {submesh} is not triangle topology"; return false; }
+			List<int> source = _sourceSubmeshes[submesh]; source.Clear();
 			mesh.GetTriangles(source, submesh, applyBaseVertex: true);
 			if (source.Count == 0 || source.Count % 3 != 0)
-			{
-				failure = $"source head submesh {submesh} has invalid triangle indices";
-				return false;
-			}
+			{ failure = $"source head submesh {submesh} has invalid triangle indices"; return false; }
 		}
-
-		if (_vertexMarks.Length < SourceVertices.Count)
+		else if (part == SourceAcquisitionPartCount - 1)
 		{
-			_vertexMarks = new int[SourceVertices.Count];
-			_markGeneration = 1;
+			if (_vertexMarks.Length < SourceVertices.Count)
+			{ _vertexMarks = new int[SourceVertices.Count]; _markGeneration = 1; }
 		}
+		else throw new ArgumentOutOfRangeException(nameof(part));
 		return true;
 	}
 
@@ -568,26 +574,46 @@ internal sealed partial class ProceduralHeadWoundWorkspace
 		return (uint)vertexIndex < (uint)_vertexMarks.Length && _vertexMarks[vertexIndex] == _markGeneration;
 	}
 
+	internal int HeadUploadPartCount => 15 + _filteredSubmeshes.Length;
+
 	internal void ApplyFilteredIndicesOnMainThread(Mesh mesh, Bounds? bounds = null)
 	{
-		mesh.Clear(keepVertexLayout: false);
-		mesh.indexFormat = SourceVertices.Count > ushort.MaxValue ? IndexFormat.UInt32 : IndexFormat.UInt16;
-		mesh.SetVertices(SourceVertices);
-		if (SourceNormals.Count == SourceVertices.Count) mesh.SetNormals(SourceNormals);
-		if (SourceTangents.Count == SourceVertices.Count) mesh.SetTangents(SourceTangents);
-		if (SourceColors.Count == SourceVertices.Count) mesh.SetColors(SourceColors);
-		if (SourceBoneWeights.Count == SourceVertices.Count) mesh.boneWeights = SourceBoneWeights.ToArray();
-		for (int channel = 0; channel < SourceUvs.Length; channel++)
+		for (int part = 0; part < HeadUploadPartCount; part++) ApplyFilteredIndicesPartOnMainThread(mesh, part, bounds);
+	}
+
+	// Each channel/submesh is an atomic Unity call; the runtime yields between
+	// parts when its shared frame allowance is exhausted. The full-upload oracle
+	// uses these same parts so layout and all eight UV channels remain identical.
+	internal void ApplyFilteredIndicesPartOnMainThread(Mesh mesh, int part, Bounds? bounds = null)
+	{
+		if ((uint)part >= (uint)HeadUploadPartCount) throw new ArgumentOutOfRangeException(nameof(part));
+		if (part == 0)
 		{
+			mesh.Clear(keepVertexLayout: false);
+			mesh.indexFormat = SourceVertices.Count > ushort.MaxValue ? IndexFormat.UInt32 : IndexFormat.UInt16;
+			mesh.SetVertices(SourceVertices);
+		}
+		else if (part == 1) { if (SourceNormals.Count == SourceVertices.Count) mesh.SetNormals(SourceNormals); }
+		else if (part == 2) { if (SourceTangents.Count == SourceVertices.Count) mesh.SetTangents(SourceTangents); }
+		else if (part == 3) { if (SourceColors.Count == SourceVertices.Count) mesh.SetColors(SourceColors); }
+		else if (part == 4) { if (SourceBoneWeights.Count == SourceVertices.Count) mesh.boneWeights = SourceBoneWeights.ToArray(); }
+		else if (part < 13)
+		{
+			int channel = part - 5;
 			if (SourceUvs[channel].Count == SourceVertices.Count) mesh.SetUVs(channel, SourceUvs[channel]);
 		}
-		mesh.subMeshCount = _filteredSubmeshes.Length;
-		for (int submesh = 0; submesh < _filteredSubmeshes.Length; submesh++)
+		else if (part == 13) mesh.subMeshCount = _filteredSubmeshes.Length;
+		else if (part < 14 + _filteredSubmeshes.Length)
 		{
+			int submesh = part - 14;
 			mesh.SetTriangles(_filteredSubmeshes[submesh], submesh, calculateBounds: false);
 		}
-		if (bounds.HasValue) mesh.bounds = bounds.Value;
-		else mesh.RecalculateBounds();
+		else if (part == HeadUploadPartCount - 1)
+		{
+			if (bounds.HasValue) mesh.bounds = bounds.Value;
+			else mesh.RecalculateBounds();
+		}
+		else throw new ArgumentOutOfRangeException(nameof(part));
 	}
 
 	internal int GetOrCreateMidpointVertex(int a, int b, int maximumGeneratedVertices)

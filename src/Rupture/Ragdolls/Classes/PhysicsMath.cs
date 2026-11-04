@@ -9,12 +9,15 @@ internal static class PhysicsMath
 	private const float MaximumProjectileImpulse = 500f;
 
 	internal static float CalculateProjectileImpulse(float massGram, float velocityMetersPerSecond, float multiplier)
+		=> CalculateProjectileImpulseWithGain(massGram, velocityMetersPerSecond, multiplier, CorpseReactionGain);
+
+	internal static float CalculateProjectileImpulseWithGain(float massGram, float velocityMetersPerSecond, float multiplier, float gain)
 	{
-		if (float.IsNaN(massGram) || float.IsInfinity(massGram) || float.IsNaN(velocityMetersPerSecond) || float.IsInfinity(velocityMetersPerSecond) || float.IsNaN(multiplier) || float.IsInfinity(multiplier) || massGram <= 0f || velocityMetersPerSecond <= 0f || multiplier <= 0f)
+		if (float.IsNaN(massGram) || float.IsInfinity(massGram) || float.IsNaN(velocityMetersPerSecond) || float.IsInfinity(velocityMetersPerSecond) || float.IsNaN(multiplier) || float.IsInfinity(multiplier) || float.IsNaN(gain) || float.IsInfinity(gain) || massGram <= 0f || velocityMetersPerSecond <= 0f || multiplier <= 0f || gain <= 0f)
 		{
 			return 0f;
 		}
-		float momentum = massGram / 1000f * velocityMetersPerSecond * multiplier * CorpseReactionGain;
+		float momentum = massGram / 1000f * velocityMetersPerSecond * multiplier * gain;
 		return momentum > MaximumProjectileImpulse ? MaximumProjectileImpulse : momentum;
 	}
 }

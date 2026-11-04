@@ -13,7 +13,7 @@ using Rupture.Ragdolls.External;
 
 namespace Rupture.PhysXBackend;
 
-public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExternalCorpseControlRuntime
+public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExternalCorpseControlRuntime, IExternalAngularDriveRuntime
 {
 	private const float EnvironmentRadius = 2f;
 	private const int InitialOverlapCapacity = 256;
@@ -154,7 +154,8 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 		_options = options;
 		Directory.CreateDirectory(options.CacheRoot);
 		_api = new NativeApi(options.BackendRoot, options.GraphicalCasings);
-		_meshGeometrySource = new UnityPhysXMeshGeometrySource(_api, options.EnvironmentMask, options.Log);
+		_meshGeometrySource = new UnityPhysXMeshGeometrySource(_api, options.EnvironmentMask, options.Log,
+			options.ScheduleBootstrapProbe, options.EnvironmentMode == ExternalEnvironmentMode.PrebakeEntireRaid);
 		_ownerThread = new Thread(OwnerLoop)
 		{
 			IsBackground = true,

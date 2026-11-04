@@ -87,12 +87,12 @@ internal static class PacketCompatibilityTests
             if (type.Name == "RuptureHelloPacket")
             {
                 if (Id(type) != expected.Id) throw new Exception("Hello packet identifier changed");
-                type.GetField("Protocol").SetValue(wire, 14);
+                type.GetField("Protocol").SetValue(wire, 15);
                 object current = Activator.CreateInstance(type);
                 var currentReader = new NetDataReader(Serialize(wire));
                 ((INetSerializable)current).Deserialize(currentReader);
                 if (currentReader.AvailableBytes != 0 || !Serialize(wire).SequenceEqual(Serialize(current)))
-                    throw new Exception("Protocol-14 configuration hello did not roundtrip");
+                    throw new Exception("Protocol-15 configuration hello did not roundtrip");
                 // Historical configuration has a different schema and must be rejected.
                 bool rejected = false;
                 try { ((INetSerializable)current).Deserialize(new NetDataReader(Convert.FromBase64String(expected.Bytes))); }
@@ -101,7 +101,7 @@ internal static class PacketCompatibilityTests
                     .GetMethod("Compatible", BindingFlags.Static | BindingFlags.NonPublic);
                 if (!rejected && (bool)compatible.Invoke(null, new[] { type.GetField("Protocol").GetValue(current), type.GetField("Version").GetValue(current) }))
                     throw new Exception("Historical protocol-4 configuration was accepted by the handshake");
-                Console.WriteLine("PASS: unchanged hello identity, protocol-14 configuration and historical protocol rejection");
+                Console.WriteLine("PASS: unchanged hello identity, protocol-15 configuration and historical protocol rejection");
                 continue;
             }
             if (Id(type) != expected.Id || Convert.ToBase64String(Serialize(wire)) != expected.Bytes)

@@ -27,7 +27,21 @@ internal static class ConfigurationTests
         Check(type.GetProperty("ArterySpray", Flags) == null && config.Count == type.GetProperties(BindingFlags.Public | BindingFlags.Static).Length,
             "no arterial, drip or soaking configuration toggle is bound");
         string[] original = Capture();
-        Check(original.Length == 16, "protocol-14 synchronized configuration includes explosions-only living severing");
+        Check(original.Length == 19, "protocol-15 synchronizes death reaction settings");
+        Check(new[] { "CorrectedLethalImpulse", "InheritRootVelocity", "AngularResistance" }.All(name => (bool)Entry(name).BoxedValue && (bool)Entry(name).DefaultValue),
+            "corrected lethal 1x, movement inheritance and brief angular resistance are production defaults");
+        Call("SetDeathReactionPreset", false);
+        Check(Capture().Take(16).SequenceEqual(original.Take(16)) && Capture()[16] == "false" && Capture()[17] == "true" && Capture()[18] == "false",
+            "old preset keeps movement inheritance with amplified lethal impulses and passive joints, preserving unrelated settings");
+        Entry("InheritRootVelocity").BoxedValue = false;
+        Call("SetDeathReactionPreset", false);
+        Check((bool)Entry("InheritRootVelocity").BoxedValue, "old preset restores shared movement inheritance even after a custom override");
+        Entry("InheritRootVelocity").BoxedValue = false;
+        Call("SetDeathReactionPreset", true);
+        Check(Capture().SequenceEqual(original), "new preset restores reduced lethal impulse, inherited movement and angular resistance without changing other preferences");
+        var presetTags = Entry("CorrectedLethalImpulse").Description.Tags.Single(t => t.GetType().Name == "ConfigurationManagerAttributes");
+        Check(presetTags.GetType().GetField("CustomDrawer").GetValue(presetTags) is Action<ConfigEntryBase> &&
+            (bool)presetTags.GetType().GetField("HideDefaultButton").GetValue(presetTags), "visible preset row exposes the installed ConfigurationManager custom IMGUI drawer ABI");
         Check((float)Entry("LivingLegMomentumThreshold").BoxedValue == 24f && (float)Entry("DismembermentMomentumThreshold").BoxedValue == 12f,
             "living-leg threshold defaults to twice the separate corpse threshold");
         Check((bool)Entry("LivingBotLegSevering").BoxedValue, "living bot severing defaults enabled");
@@ -43,9 +57,10 @@ internal static class ConfigurationTests
                 var entry = (ConfigEntryBase)property.GetValue(null);
                 var tags = entry.Description.Tags.Single(t => t.GetType().Name == "ConfigurationManagerAttributes");
                 bool advanced = (bool)tags.GetType().GetField("IsAdvanced").GetValue(tags);
-                Check(advanced == (property.Name != "EnableDebugLogging" && property.Name != "ForceHeadlessConfiguration"), "configuration visibility: " + property.Name);
+                Check(advanced == (property.Name != "EnableDebugLogging" && property.Name != "ForceHeadlessConfiguration" && property.Name != "CorrectedLethalImpulse"), "configuration visibility: " + property.Name);
             }
             Check(!(bool)Entry("EnableDebugLogging").BoxedValue, "debug logging is off by default");
+			Check(!(bool)Entry("WeaponColliderWireframe").BoxedValue, "weapon collider wireframes are off by default");
             Check(!(bool)Entry("ForceHeadlessConfiguration").BoxedValue, "headless requester settings remain the default policy");
             var source = new ManualLogSource("Rupture regression");
             int messages = 0; source.LogEvent += (_, _) => messages++;
@@ -66,6 +81,7 @@ internal static class ConfigurationTests
             Entry("EnableDebugLogging").BoxedValue = true;
 
             Entry("FreezeCorpseRagdollsForWoundDebug").BoxedValue = true;
+			Entry("WeaponColliderWireframe").BoxedValue = true;
             Entry("ExternalPhysXDispatcherThreads").BoxedValue = 4;
             string[] host = (string[])original.Clone(); host[0] = "false"; host[2] = "2.5"; host[5] = "3";
             host[10] = "24";
@@ -73,7 +89,11 @@ internal static class ConfigurationTests
             host[13] = "48";
             host[14] = "true";
             host[15] = "true";
+            host[16] = host[17] = host[18] = "false";
             Check(Apply(host) && Capture().SequenceEqual(host), "authority visual snapshot applies completely");
+            Call("SetDeathReactionPreset", true);
+            Entry("AngularResistance").BoxedValue = true;
+            Check(Capture().SequenceEqual(host), "client preset and individual death settings cannot override the host");
             Check((float)Entry("LivingLegMomentumThreshold").BoxedValue == 48f,
                 "authority synchronizes the independent living-leg threshold");
             Check((bool)Entry("LivingLegSeveringSpecialAI").BoxedValue, "authority synchronizes special AI eligibility");
@@ -84,7 +104,8 @@ internal static class ConfigurationTests
             Entry("AutomaticHeadgearDetachment").BoxedValue = true;
             Check(!(bool)Entry("AutomaticHeadgearDetachment").BoxedValue, "client cannot override host headgear detachment");
             Check((bool)Entry("EnableDebugLogging").BoxedValue && (bool)Entry("FreezeCorpseRagdollsForWoundDebug").BoxedValue &&
-                (int)Entry("ExternalPhysXDispatcherThreads").BoxedValue == 4, "debug options and machine performance settings remain local");
+                (int)Entry("ExternalPhysXDispatcherThreads").BoxedValue == 4 && (bool)Entry("WeaponColliderWireframe").BoxedValue,
+				"debug options and machine performance settings remain local");
             Entry("ShotIntensity").BoxedValue = 7f;
             Check((float)Entry("ShotIntensity").BoxedValue == 3f, "client changes cannot override active authority visuals");
             Entry("DismembermentMomentumThreshold").BoxedValue = 6f;
@@ -104,6 +125,11 @@ internal static class ConfigurationTests
             Check(!Apply(bad) && Capture().SequenceEqual(host), "malformed special AI eligibility rejects the entire authority snapshot");
             bad = (string[])host.Clone(); bad[15] = "invalid";
             Check(!Apply(bad) && Capture().SequenceEqual(host), "malformed explosions-only mode rejects the entire authority snapshot");
+            foreach (int index in new[] { 16, 17, 18 })
+            {
+                bad = (string[])host.Clone(); bad[index] = "invalid";
+                Check(!Apply(bad) && Capture().SequenceEqual(host), "malformed death setting rejects atomically: " + index);
+            }
 
             bool restore = (bool)Call("BeforeSave", config);
             try { config.Save(); } finally { Call("AfterSave", restore); }
@@ -130,7 +156,7 @@ internal static class ConfigurationTests
             Type helloType = Program.Bridge.GetType("Rupture.Impacts.RuptureHelloPacket", true);
             object hello = Activator.CreateInstance(helloType);
             void Field(string name, object value) => helloType.GetField(name).SetValue(hello, value);
-            Field("Protocol", 14); Field("Version", "1.2.2"); Field("Session", new string('a', 32));
+            Field("Protocol", 15); Field("Version", assembly.GetName().Version.ToString(3)); Field("Session", new string('a', 32));
             Field("ConfigurationRevision", 2u); Field("VisualConfiguration", host);
             var writer = new NetDataWriter(); ((INetSerializable)hello).Serialize(writer);
             object received = Activator.CreateInstance(helloType);

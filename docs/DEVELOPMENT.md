@@ -69,7 +69,7 @@ See [limb calibration](Limb-Clothing-Folds.md) and the [clothing harness](../uni
 
 ## Packaging and publication boundary
 
-The current source version is 1.2.2, impact protocol 14, native physics ABI 10 and corpse control API V1. All multiplayer peers require the same Rupture build. Preserve configuration keys, wire order, public APIs and compatibility identifiers, including HollywoodFX's legacy GUID match.
+The current source version is 1.3.1, impact protocol 15, native physics ABI 10 and corpse control API V1. All multiplayer peers require the same Rupture build. Preserve configuration keys, wire order, public APIs and compatibility identifiers, including HollywoodFX's legacy GUID match.
 
 Packaging requires **Rupture itself to be a Git repository** because the script enumerates non-ignored files with `git ls-files`.
 
