@@ -27,7 +27,7 @@ internal static class ConfigurationTests
         Check(type.GetProperty("ArterySpray", Flags) == null && config.Count == type.GetProperties(BindingFlags.Public | BindingFlags.Static).Length,
             "no arterial, drip or soaking configuration toggle is bound");
         string[] original = Capture();
-        Check(original.Length == 19, "protocol-15 synchronizes death reaction settings");
+        Check(original.Length == 19, "the current protocol synchronizes death reaction settings");
         Check(new[] { "CorrectedLethalImpulse", "InheritRootVelocity", "AngularResistance" }.All(name => (bool)Entry(name).BoxedValue && (bool)Entry(name).DefaultValue),
             "corrected lethal 1x, movement inheritance and brief angular resistance are production defaults");
         Call("SetDeathReactionPreset", false);
@@ -156,7 +156,7 @@ internal static class ConfigurationTests
             Type helloType = Program.Bridge.GetType("Rupture.Impacts.RuptureHelloPacket", true);
             object hello = Activator.CreateInstance(helloType);
             void Field(string name, object value) => helloType.GetField(name).SetValue(hello, value);
-            Field("Protocol", 15); Field("Version", assembly.GetName().Version.ToString(3)); Field("Session", new string('a', 32));
+            Field("Protocol", 16); Field("Version", assembly.GetName().Version.ToString(3)); Field("Session", new string('a', 32));
             Field("ConfigurationRevision", 2u); Field("VisualConfiguration", host);
             var writer = new NetDataWriter(); ((INetSerializable)hello).Serialize(writer);
             object received = Activator.CreateInstance(helloType);

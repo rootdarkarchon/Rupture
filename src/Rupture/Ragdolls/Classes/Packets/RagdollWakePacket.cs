@@ -6,6 +6,7 @@ public struct RagdollWakeData
 	public int PlayerId;
 	public string ProfileId;
 	public uint DeathSequence;
+	public uint OwnershipEpoch;
 	public uint EventSequence;
 	public byte ReactivateSettled;
 	public int DynamicDuration;

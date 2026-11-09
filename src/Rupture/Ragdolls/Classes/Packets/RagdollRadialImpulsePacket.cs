@@ -7,6 +7,7 @@ public struct RagdollRadialImpulseData
 	public int PlayerId;
 	public string ProfileId;
 	public uint DeathSequence;
+	public uint OwnershipEpoch;
 	public uint EventSequence;
 	public Vector3 Origin;
 	public float Radius;

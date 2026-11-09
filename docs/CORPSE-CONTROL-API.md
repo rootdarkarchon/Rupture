@@ -10,6 +10,8 @@ Calls that drive physics belong on the solo instance or Fika host/headless autho
 
 Only actual `Corpse` owners are supported. Living bots and Fika-downed `ObservedPlayer` ragdolls are outside this API. Missing shadow construction alone does not authorize a native route: deferred/reserved or unavailable managed ownership must be handled explicitly. Rupture absent permits an independent native route; an installed provider without V1 is not equivalent to absence.
 
+Consumers that run their own Unity simulation of a corpse use the sibling `Rupture.Integration.CorpseHandoffV1` API instead ([CORPSE-HANDOFF-API.md](CORPSE-HANDOFF-API.md)). The two are mutually exclusive per corpse: `Begin` returns `Busy` while a handoff token holds the corpse, and handoff `Release` returns `Busy` while a drag lease holds it.
+
 ## Public managed declarations
 
 The public type lives in `Rupture.dll`, namespace `Rupture.Integration`. Discover the plugin through BepInEx GUID `com.rootdarkarchon.rupture`, then resolve this exact type/version through an optional adapter. The consumer must remain loadable without Rupture. DTOs below are public managed types, not native interop structures or network packets. Their names and enum values form the consumer contract; opaque lease values and body indices are never PhysX pointers. The exact source is [CorpseDragV1.cs](../src/Rupture/Integration/CorpseDragV1.cs).

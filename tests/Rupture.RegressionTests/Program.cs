@@ -35,6 +35,7 @@ internal static class Program
         PacketCompatibilityTests.Run(Bridge);
 		PoseAssemblyTests.Run(assembly);
 		CorpseDragAbiTests.Run(assembly);
+		CorpseHandoffAbiTests.Run(assembly);
 		BotSeverTests.Run(assembly, Bridge);
         ImpactPolicyTests.Run(assembly);
         ConfigurationTests.Run(assembly);

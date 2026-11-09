@@ -2,7 +2,7 @@
 
 Rupture adds procedural gore, injury effects and reactive corpse physics to **SPT 4.1**, with optional **Fika** support.
 
-Current version: **1.3.1**.
+Current version: **1.4.0**.
 
 > [!NOTE]
 > Rupture was written with OpenAI Codex under human direction, review and testing. Live-game validation remains necessary; automated checks do not establish compatibility with every setup.

@@ -8,6 +8,7 @@ public struct RagdollPointImpulsePacket : INetSerializable
 	public int PlayerId;
 	public string ProfileId;
 	public uint DeathSequence;
+	public uint OwnershipEpoch;
 	public uint EventSequence;
 	public string BodyPath;
 	public Vector3 LocalPoint;
@@ -18,6 +19,7 @@ public struct RagdollPointImpulsePacket : INetSerializable
 		writer.Put(PlayerId);
 		writer.Put(ProfileId ?? string.Empty);
 		writer.Put(DeathSequence);
+		writer.Put(OwnershipEpoch);
 		writer.Put(EventSequence);
 		writer.Put(BodyPath ?? string.Empty);
 		writer.PutUnmanaged(LocalPoint);
@@ -29,6 +31,7 @@ public struct RagdollPointImpulsePacket : INetSerializable
 		PlayerId = reader.GetInt();
 		ProfileId = reader.GetString();
 		DeathSequence = reader.GetUInt();
+		OwnershipEpoch = reader.GetUInt();
 		EventSequence = reader.GetUInt();
 		BodyPath = reader.GetString();
 		LocalPoint = reader.GetUnmanaged<Vector3>();
@@ -39,6 +42,7 @@ public struct RagdollPointImpulsePacket : INetSerializable
         PlayerId = value.PlayerId,
         ProfileId = value.ProfileId,
         DeathSequence = value.DeathSequence,
+        OwnershipEpoch = value.OwnershipEpoch,
         EventSequence = value.EventSequence,
         BodyPath = value.BodyPath,
         LocalPoint = value.LocalPoint,
@@ -49,6 +53,7 @@ public struct RagdollPointImpulsePacket : INetSerializable
         PlayerId = value.PlayerId,
         ProfileId = value.ProfileId,
         DeathSequence = value.DeathSequence,
+        OwnershipEpoch = value.OwnershipEpoch,
         EventSequence = value.EventSequence,
         BodyPath = value.BodyPath,
         LocalPoint = value.LocalPoint,

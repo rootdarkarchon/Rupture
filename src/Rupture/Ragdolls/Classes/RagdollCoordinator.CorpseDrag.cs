@@ -57,5 +57,6 @@ internal static partial class RagdollCoordinator
 		state.LastReceivedPoseSnapshotSequence = tombstone.LastReceivedPoseSnapshotSequence;
 		state.LastDiscardedPoseSnapshotSequence = tombstone.LastDiscardedPoseSnapshotSequence;
 		state.AuthorityPlaybackSequenceBarrier = tombstone.LastReceivedPoseSnapshotSequence;
+		state.OwnershipEpoch = tombstone.OwnershipEpoch;
 	}
 }

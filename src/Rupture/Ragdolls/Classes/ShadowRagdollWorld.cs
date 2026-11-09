@@ -256,6 +256,7 @@ internal static partial class ShadowRagdollWorld
 		internal readonly List<DetachedEffect> DetachedEffects = new List<DetachedEffect>();
 		internal readonly HashSet<ShadowBody> PermanentlyDisabledBodies = new HashSet<ShadowBody>();
 		internal readonly List<ExternalJointBinding> ExternalJoints = new List<ExternalJointBinding>();
+		internal HashSet<Transform> RebuildSeveredBones; // set only while a handoff adoption rebuilds the core rig
 	}
 
 	private sealed class PendingColliderDisable
@@ -436,6 +437,7 @@ internal static partial class ShadowRagdollWorld
 	{
 		ResetLivingFalls();
 		ResetDragLeases();
+		FailHandoffLeases();
 		_failLocalSimulation?.Invoke();
 		_externalRaidFailure = reason;
 		if (!_externalFallbackLogged)
@@ -561,7 +563,7 @@ internal static partial class ShadowRagdollWorld
 				DestroyRig(rig, restoreNative: false);
 				continue;
 			}
-			if ((rig.Active || rig.Dormant) && !IsDragHeld(rig.Corpse) && !rig.IgnoreNativeStopped && rig.NativeRagdoll?._isPhysicsDone == true)
+			if ((rig.Active || rig.Dormant) && !IsDragHeld(rig.Corpse) && !IsHandoffHeld(rig.Corpse) && !rig.IgnoreNativeStopped && rig.NativeRagdoll?._isPhysicsDone == true)
 			{
 				Settle(rig);
 			}
@@ -634,6 +636,7 @@ internal static partial class ShadowRagdollWorld
 
 		if (!HeadlessSimulationPolicy.TryConsume(Time.deltaTime, ref _headlessSimulationAccumulator, out float simulationDeltaTime))
 		{
+			ServiceQueuedHandoffs();
 			return;
 		}
 		// The policy submits at most once per Update: fixed 30 Hz while the server is
@@ -652,6 +655,7 @@ internal static partial class ShadowRagdollWorld
 		// forcing a perpetual empty step just to drain the preceding result.
 		if (_externalStepSubmitted && !CompleteExternalStep()) return;
 		ProcessDragBoundary();
+		ProcessHandoffBoundary();
 		bool continuousSimulation = ContinuousSimulationEnabled;
 		bool hasActiveRig = false;
 		int activeRigs = 0;
@@ -838,7 +842,8 @@ internal static partial class ShadowRagdollWorld
 				continue;
 			}
 			ReleaseInvalidWeapon(rig);
-			if (rig.Active || rig.Dormant)
+			bool handoffHeld = IsHandoffHeld(rig.Corpse);
+			if ((rig.Active || rig.Dormant) && !handoffHeld)
 			{
 				foreach (ShadowBody body in rig.Bodies)
 				{
@@ -856,7 +861,7 @@ internal static partial class ShadowRagdollWorld
 						ref maximumPositionError, ref maximumAngleError);
 				}
 			}
-			else if (rig.Settled)
+			else if (rig.Settled || handoffHeld)
 			{
 				ShadowBody weapon = rig.WeaponBody;
 				if (weapon?.Proxy != null && !weapon.Proxy.isKinematic)
@@ -965,6 +970,7 @@ internal static partial class ShadowRagdollWorld
 		LethalImpulseExperiment.Reset();
 		ResetLivingFalls();
 		ResetDragLeases();
+		ResetHandoffLeases();
 		_resetLocalSimulation?.Invoke();
 		_weaponColliderAudits = 0;
 		PendingBuilds.Clear();
@@ -1049,7 +1055,7 @@ internal static partial class ShadowRagdollWorld
 
 	internal static Rigidbody GetSimulationBody(Rigidbody nativeBody)
 	{
-		if (nativeBody != null && BodiesByNative.TryGetValue(nativeBody, out ShadowBody binding) && binding?.Rig?.Active == true && binding.Proxy != null)
+		if (nativeBody != null && BodiesByNative.TryGetValue(nativeBody, out ShadowBody binding) && binding?.Rig?.Active == true && binding.Proxy != null && !IsHeldCoreBody(binding))
 		{
 			return binding.Proxy.UnityBody;
 		}
@@ -1058,7 +1064,7 @@ internal static partial class ShadowRagdollWorld
 
 	internal static bool TrySetSimulationVelocity(Rigidbody nativeBody, Vector3 velocity)
 	{
-		if (nativeBody != null && BodiesByNative.TryGetValue(nativeBody, out ShadowBody binding) && binding?.Rig?.Active == true && binding.Proxy != null)
+		if (nativeBody != null && BodiesByNative.TryGetValue(nativeBody, out ShadowBody binding) && binding?.Rig?.Active == true && binding.Proxy != null && !IsHeldCoreBody(binding))
 		{
 			if (binding.Proxy.isKinematic) return false;
 			binding.Proxy.velocity = velocity;
@@ -1071,7 +1077,7 @@ internal static partial class ShadowRagdollWorld
 
 	internal static bool IsSimulationBodyDynamic(Rigidbody nativeBody)
 	{
-		if (nativeBody != null && BodiesByNative.TryGetValue(nativeBody, out ShadowBody binding) && binding?.Rig?.Active == true && binding.Proxy != null)
+		if (nativeBody != null && BodiesByNative.TryGetValue(nativeBody, out ShadowBody binding) && binding?.Rig?.Active == true && binding.Proxy != null && !IsHeldCoreBody(binding))
 		{
 			return !binding.Proxy.isKinematic;
 		}
@@ -1080,7 +1086,7 @@ internal static partial class ShadowRagdollWorld
 
 	internal static bool TryApplySimulationPointImpulse(Rigidbody nativeBody, Vector3 impulse, Vector3 worldPoint)
 	{
-		if (nativeBody != null && BodiesByNative.TryGetValue(nativeBody, out ShadowBody binding) && binding?.Rig != null && binding.Proxy != null)
+		if (nativeBody != null && BodiesByNative.TryGetValue(nativeBody, out ShadowBody binding) && binding?.Rig != null && binding.Proxy != null && !IsHeldCoreBody(binding))
 		{
 			if (ReferenceEquals(binding, binding.Rig.WeaponBody))
 			{
@@ -1114,7 +1120,7 @@ internal static partial class ShadowRagdollWorld
 	{
 		count = 0; before = after = Vector3.zero; reason = "inactive-or-invalid-core";
 		if (ragdoll == null || !IsFinite(delta) || !RigsByRagdoll.TryGetValue(ragdoll, out ShadowRig rig) ||
-			!rig.Active || !rig.Committed || rig.CoreBodies.Count == 0 || rig.CoreBodies.Count > 32) return false;
+			!rig.Active || IsHandoffHeld(rig.Corpse) || !rig.Committed || rig.CoreBodies.Count == 0 || rig.CoreBodies.Count > 32) return false;
 		foreach (ShadowBody body in rig.CoreBodies)
 		{
 			if (rig.PermanentlyDisabledBodies.Contains(body)) continue;
@@ -1155,7 +1161,7 @@ internal static partial class ShadowRagdollWorld
 
 	internal static bool HasActiveLethalExperimentBody(Corpse corpse, Rigidbody nativeBody) =>
 		corpse != null && nativeBody != null && BodiesByNative.TryGetValue(nativeBody, out ShadowBody body) &&
-		body.Rig?.Corpse == corpse && body.Rig.Active && !body.Rig.PermanentlyDisabledBodies.Contains(body) &&
+		body.Rig?.Corpse == corpse && !IsHandoffHeld(corpse) && body.Rig.Active && !body.Rig.PermanentlyDisabledBodies.Contains(body) &&
 		body.CountsForSleep && body.Proxy is ExternalShadowBodyProxy external && external.ExternalBody.IsValid && !body.Proxy.isKinematic;
 
 	internal static bool TryReadLethalExperimentMotion(Rigidbody nativeBody, out Vector3 velocity, out Vector3 angular)
@@ -1169,7 +1175,7 @@ internal static partial class ShadowRagdollWorld
 	{
 		poses = Array.Empty<RagdollPose>();
 		if (corpse == null || !RigsByCorpse.TryGetValue(corpse, out ShadowRig rig) ||
-			rig.CoreBodyCount <= 0 || rig.CoreBodies.Count != rig.CoreBodyCount)
+			rig.CoreBodyCount <= 0 || rig.CoreBodies.Count != rig.CoreBodyCount || IsHandoffHeld(corpse))
 		{
 			return false;
 		}
@@ -1201,7 +1207,7 @@ internal static partial class ShadowRagdollWorld
 	internal static bool ApplyAuthorityPose(Corpse corpse, RagdollPose[] poses, bool terminal)
 	{
 		if (corpse == null || poses == null || !RigsByCorpse.TryGetValue(corpse, out ShadowRig rig) ||
-			rig.CoreBodyCount <= 0 || rig.CoreBodies.Count != rig.CoreBodyCount)
+			rig.CoreBodyCount <= 0 || rig.CoreBodies.Count != rig.CoreBodyCount || IsHandoffHeld(corpse))
 		{
 			return false;
 		}
@@ -1318,7 +1324,7 @@ internal static partial class ShadowRagdollWorld
 	internal static bool TryResolveHitBody(Corpse corpse, Collider hitCollider, out Rigidbody nativeBody)
 	{
 		nativeBody = null;
-		if (corpse == null || hitCollider == null || !RigsByCorpse.TryGetValue(corpse, out ShadowRig rig) ||
+		if (corpse == null || hitCollider == null || IsHandoffHeld(corpse) || !RigsByCorpse.TryGetValue(corpse, out ShadowRig rig) ||
 			!TryResolveHitShadowBody(rig, hitCollider, allowNearest: true, out ShadowBody body))
 		{
 			return false;
@@ -1481,7 +1487,7 @@ internal static partial class ShadowRagdollWorld
 		body.Proxy.collisionDetectionMode = CollisionDetectionMode.Discrete;
 		body.Proxy.isKinematic = true;
 		if (body.Proxy is ExternalShadowBodyProxy external) external.ExternalBody.CollisionEnabled = false;
-		UpdateParkedBodyPose(body, updateVisible: true);
+		UpdateParkedBodyPose(body, updateVisible: !IsHandoffHeld(rig.Corpse));
 	}
 
 	private static ShadowBody FindRetainedParentBody(ShadowRig rig, ShadowBody body)
@@ -1564,7 +1570,7 @@ internal static partial class ShadowRagdollWorld
 		bodyName = null;
 		localPoint = Vector3.zero;
 		if (corpse == null || hitCollider == null || !IsFinite(impulse) || !IsFinite(worldPoint) || impulse.sqrMagnitude <= 0f ||
-			!RigsByCorpse.TryGetValue(corpse, out ShadowRig rig) || !rig.Active ||
+			!RigsByCorpse.TryGetValue(corpse, out ShadowRig rig) || !rig.Active || IsHandoffHeld(corpse) ||
 			!TryResolveHitShadowBody(rig, hitCollider, allowNearest: true, out ShadowBody body) ||
 			body.Proxy == null || body.Proxy.isKinematic)
 		{
@@ -1793,24 +1799,24 @@ internal static partial class ShadowRagdollWorld
 
 	internal static bool IsActive(Corpse corpse)
 	{
-		return corpse != null && RigsByCorpse.TryGetValue(corpse, out ShadowRig rig) && (rig.Active || rig.Dormant);
+		return corpse != null && RigsByCorpse.TryGetValue(corpse, out ShadowRig rig) && (rig.Active || rig.Dormant) && !IsHandoffHeld(corpse);
 	}
 
 	internal static bool IsSettled(Corpse corpse)
 	{
-		return corpse != null && RigsByCorpse.TryGetValue(corpse, out ShadowRig rig) && rig.Settled;
+		return corpse != null && RigsByCorpse.TryGetValue(corpse, out ShadowRig rig) && rig.Settled && !IsHandoffHeld(corpse);
 	}
 
 	internal static bool TryApplyRadialImpulse(Corpse corpse, Vector3 origin, float radius, float force, out int affectedBodies)
 	{
 		affectedBodies = 0;
 		if (corpse == null || !IsFinite(origin) || !IsFinite(radius) || !IsFinite(force) || radius <= 0f || force <= 0f ||
-			!RigsByCorpse.TryGetValue(corpse, out ShadowRig rig) || (!rig.Active && rig.WeaponBody?.Proxy == null))
+			!RigsByCorpse.TryGetValue(corpse, out ShadowRig rig) || ((!rig.Active || IsHandoffHeld(corpse)) && rig.WeaponBody?.Proxy == null))
 		{
 			return false;
 		}
 
-		bool independentWeaponOnly = !rig.Active;
+		bool independentWeaponOnly = !rig.Active || IsHandoffHeld(corpse);
 		foreach (ShadowBody body in rig.Bodies)
 		{
 			if (independentWeaponOnly && !ReferenceEquals(body, rig.WeaponBody))
@@ -1903,7 +1909,7 @@ internal static partial class ShadowRagdollWorld
 
 	internal static bool ForceSettle(Corpse corpse)
 	{
-		if (corpse == null || !RigsByCorpse.TryGetValue(corpse, out ShadowRig rig) || (!rig.Active && !rig.Dormant))
+		if (corpse == null || IsHandoffHeld(corpse) || !RigsByCorpse.TryGetValue(corpse, out ShadowRig rig) || (!rig.Active && !rig.Dormant))
 		{
 			return false;
 		}
@@ -1913,7 +1919,7 @@ internal static partial class ShadowRagdollWorld
 
 	internal static bool Wake(Corpse corpse)
 	{
-		if (corpse == null || !RigsByCorpse.TryGetValue(corpse, out ShadowRig rig) || rig.Settled)
+		if (corpse == null || IsHandoffHeld(corpse) || !RigsByCorpse.TryGetValue(corpse, out ShadowRig rig) || rig.Settled)
 		{
 			return false;
 		}
@@ -1932,7 +1938,7 @@ internal static partial class ShadowRagdollWorld
 	internal static bool WakeFromImpact(Corpse corpse, List<Corpse> awakenedCorpses)
 	{
 		awakenedCorpses?.Clear();
-		if (!Enabled || corpse == null || awakenedCorpses == null || !RigsByCorpse.TryGetValue(corpse, out ShadowRig primary))
+		if (!Enabled || corpse == null || awakenedCorpses == null || IsHandoffHeld(corpse) || !RigsByCorpse.TryGetValue(corpse, out ShadowRig primary))
 		{
 			return false;
 		}
@@ -1951,7 +1957,7 @@ internal static partial class ShadowRagdollWorld
 			awakenedCorpses.Add(rig.Corpse);
 			foreach (ShadowRig candidate in Rigs)
 			{
-				if (candidate?.Settled != true || candidate.Corpse == null || ImpactWakeVisited.Contains(candidate) ||
+				if (candidate?.Settled != true || candidate.Corpse == null || IsHandoffHeld(candidate.Corpse) || ImpactWakeVisited.Contains(candidate) ||
 					!AreNativeCollidersTouching(rig, candidate))
 				{
 					continue;
@@ -1968,14 +1974,14 @@ internal static partial class ShadowRagdollWorld
 
 	internal static bool WakeFromNetwork(Corpse corpse)
 	{
-		return corpse != null && RigsByCorpse.TryGetValue(corpse, out ShadowRig rig) && TryWakeFromImpact(rig);
+		return corpse != null && !IsHandoffHeld(corpse) && RigsByCorpse.TryGetValue(corpse, out ShadowRig rig) && TryWakeFromImpact(rig);
 	}
 
 	internal static bool BeginLocalPrediction(Corpse corpse, bool independentWeaponOnly)
 	{
 		if (corpse == null || !RigsByCorpse.TryGetValue(corpse, out ShadowRig rig)) return false;
 		if (independentWeaponOnly) return TryWakeIndependentWeapon(rig, out _);
-		if (!TryWakeFromImpact(rig)) return false;
+		if (IsHandoffHeld(corpse) || !TryWakeFromImpact(rig)) return false;
 
 		// Authority playback makes the complete tracked island kinematic. A local
 		// event must undo that ownership immediately, before its force is queued.
@@ -2017,7 +2023,7 @@ internal static partial class ShadowRagdollWorld
 
 	internal static void WakeFromNative(EFT.Interactive.CorpseRagdoll ragdoll)
 	{
-		if (ragdoll == null || !RigsByRagdoll.TryGetValue(ragdoll, out ShadowRig rig) || !rig.Dormant || rig.Settled)
+		if (ragdoll == null || !RigsByRagdoll.TryGetValue(ragdoll, out ShadowRig rig) || !rig.Dormant || rig.Settled || IsHandoffHeld(rig.Corpse))
 		{
 			return;
 		}
@@ -2125,7 +2131,7 @@ internal static partial class ShadowRagdollWorld
 
 	internal static bool RedirectForce(Rigidbody nativeBody, ShadowForceOperation operation, Vector3 force, Vector3 point, float scalar, float radius, float upwardsModifier, ForceMode mode)
 	{
-		if (nativeBody == null || !BodiesByNative.TryGetValue(nativeBody, out ShadowBody binding) || binding?.Rig == null)
+		if (nativeBody == null || !BodiesByNative.TryGetValue(nativeBody, out ShadowBody binding) || binding?.Rig == null || IsHeldCoreBody(binding))
 		{
 			return false;
 		}
@@ -2167,7 +2173,7 @@ internal static partial class ShadowRagdollWorld
 		{
 			return false;
 		}
-		if (BodiesByNative.TryGetValue(nativeBody, out ShadowBody binding) && binding?.Rig != null && binding.Proxy != null)
+		if (BodiesByNative.TryGetValue(nativeBody, out ShadowBody binding) && binding?.Rig != null && binding.Proxy != null && !IsHeldCoreBody(binding))
 		{
 			if (ReferenceEquals(binding, binding.Rig.WeaponBody))
 			{
@@ -2962,16 +2968,11 @@ internal static partial class ShadowRagdollWorld
 					DestroyRig(rig, restoreNative: false);
 					return false;
 				}
-				string path = BodyHierarchyPath.RelativeTo(skeletonRoot, nativeBody.transform) ?? nativeBody.name;
-				if (!TryCreateBody(rig, nativeBody, path, countsForSleep: true, out failure))
+				if (!TryAddCoreBody(rig, spawner, nativeBody, skeletonRoot, out failure))
 				{
 					DestroyRig(rig, restoreNative: false);
 					return false;
 				}
-				ShadowBody coreBody = rig.BodiesByNative[nativeBody];
-				coreBody.IsDragChest = spawner.TryGetComponent(out BodyPartCollider dragPart) &&
-					dragPart.BodyPartColliderType == EBodyPartColliderType.RibcageUp;
-				rig.CoreBodies.Add(coreBody);
 			}
 
 			Rigidbody weapon = ragdoll.WeaponRigidbody;
@@ -3080,6 +3081,17 @@ internal static partial class ShadowRagdollWorld
 		}
 	}
 
+	private static bool TryAddCoreBody(ShadowRig rig, RigidbodySpawner spawner, Rigidbody nativeBody, Transform skeletonRoot, out string failure)
+	{
+		string path = BodyHierarchyPath.RelativeTo(skeletonRoot, nativeBody.transform) ?? nativeBody.name;
+		if (!TryCreateBody(rig, nativeBody, path, countsForSleep: true, out failure)) return false;
+		ShadowBody coreBody = rig.BodiesByNative[nativeBody];
+		coreBody.IsDragChest = spawner.TryGetComponent(out BodyPartCollider dragPart) &&
+			dragPart.BodyPartColliderType == EBodyPartColliderType.RibcageUp;
+		rig.CoreBodies.Add(coreBody);
+		return true;
+	}
+
 	private static string DescribeThrowSite(Exception exception)
 	{
 		string trace = exception.StackTrace;
@@ -3114,7 +3126,7 @@ internal static partial class ShadowRagdollWorld
 	{
 		failure = null;
 		bool isWeapon = string.Equals(path, WeaponPath, StringComparison.Ordinal);
-		bool removed = !isWeapon && IsPreseveredBody(rig, nativeBody.transform);
+		bool removed = !isWeapon && (IsPreseveredBody(rig, nativeBody.transform) || rig.RebuildSeveredBones?.Contains(nativeBody.transform) == true);
 		List<Collider> attachedColliders = GetAttachedBodyColliders(nativeBody);
 		if (attachedColliders.Count == 0 && !removed)
 		{
@@ -3360,6 +3372,7 @@ internal static partial class ShadowRagdollWorld
 		foreach (CharacterJointSpawner spawner in rig.NativeRagdoll._jointSpawners ?? Array.Empty<CharacterJointSpawner>())
 		{
 			CharacterJoint nativeJoint = spawner?.GetComponent<CharacterJoint>();
+			if (nativeJoint == null && IsSeveredJointSpawner(rig, spawner)) continue;
 			Rigidbody nativeBody = nativeJoint?.GetComponent<Rigidbody>();
 			ShadowBody connectedBody = null;
 			if (nativeJoint?.connectedBody != null) rig.BodiesByNative.TryGetValue(nativeJoint.connectedBody, out connectedBody);
@@ -3545,7 +3558,7 @@ internal static partial class ShadowRagdollWorld
 		{
 			foreach (ShadowRig settled in Rigs)
 			{
-				if (settled?.Settled != true || settled.Root == null) continue;
+				if (settled?.Settled != true || settled.Root == null || IsHandoffHeld(settled.Corpse)) continue;
 				if (!settled.Root.activeSelf)
 				{
 					settled.Root.SetActive(true);
@@ -3568,7 +3581,7 @@ internal static partial class ShadowRagdollWorld
 		}
 		foreach (ShadowRig settled in Rigs)
 		{
-			if (settled?.Settled != true || settled.Root == null)
+			if (settled?.Settled != true || settled.Root == null || IsHandoffHeld(settled.Corpse))
 			{
 				continue;
 			}
@@ -3611,6 +3624,7 @@ internal static partial class ShadowRagdollWorld
 			{
 				continue;
 			}
+			bool held = IsHandoffHeld(rig.Corpse);
 			bool intersects = false;
 			bool weaponIntersects = false;
 			foreach (Bounds sourceBounds in movedBounds)
@@ -3622,6 +3636,7 @@ internal static partial class ShadowRagdollWorld
 				foreach (ShadowBody body in rig.Bodies)
 				{
 					if (ReferenceEquals(body, rig.WeaponBody)) continue;
+					if (held) break;
 					foreach (Collider collider in body.NativeColliders)
 					{
 						if (collider != null && collider.enabled && expanded.Intersects(collider.bounds))
@@ -3636,9 +3651,9 @@ internal static partial class ShadowRagdollWorld
 			}
 			if (!intersects) continue;
 			bool wasSettled = rig.Settled;
-			bool reactivated = wasSettled
+			bool reactivated = !held && (wasSettled
 				? RagdollCoordinator.ReactivateFromMovingEnvironment(rig.Corpse)
-				: Wake(rig.Corpse);
+				: Wake(rig.Corpse));
 			bool independentWeaponWoke = !reactivated && weaponIntersects && TryWakeIndependentWeapon(rig, out _);
 			if (!reactivated && !independentWeaponWoke)
 			{
@@ -3664,6 +3679,14 @@ internal static partial class ShadowRagdollWorld
 	}
 
 	private static void SyncNativeFromProxy(ShadowRig rig)
+	{
+		// A held corpse's core bodies belong to the handoff consumer; only the independent weapon and detached effects are presented.
+		if (IsHandoffHeld(rig.Corpse)) { SyncIndependentBodiesFromProxy(rig); return; }
+		PresentRigPose(rig);
+	}
+
+	// Handoff release presents the final proxy pose through this entry point exactly once, after its lease is live.
+	private static void PresentRigPose(ShadowRig rig)
 	{
 		ReleaseInvalidWeapon(rig);
 		LogJointDiagnostic(rig);
@@ -3855,7 +3878,7 @@ internal static partial class ShadowRagdollWorld
 
 	private static void UpdateSleepState(ShadowRig rig)
 	{
-		if (IsDragHeld(rig.Corpse)) { rig.SleepingSteps = 0; return; }
+		if (IsDragHeld(rig.Corpse) || IsHandoffHeld(rig.Corpse)) { rig.SleepingSteps = 0; return; }
 		bool sleeping = true;
 		foreach (ShadowBody body in rig.Bodies)
 		{
@@ -3921,7 +3944,7 @@ internal static partial class ShadowRagdollWorld
 
 	private static void Wake(ShadowRig rig)
 	{
-		if (rig == null || !rig.Dormant || rig.Settled)
+		if (rig == null || !rig.Dormant || rig.Settled || IsHandoffHeld(rig.Corpse))
 		{
 			return;
 		}
@@ -3944,7 +3967,7 @@ internal static partial class ShadowRagdollWorld
 
 	private static bool TryWakeFromImpact(ShadowRig rig)
 	{
-		if (rig == null || rig.Corpse == null || rig.Root == null)
+		if (rig == null || rig.Corpse == null || rig.Root == null || IsHandoffHeld(rig.Corpse))
 		{
 			return false;
 		}
@@ -4038,7 +4061,7 @@ internal static partial class ShadowRagdollWorld
 
 	private static void Settle(ShadowRig rig)
 	{
-		if (rig != null && IsDragHeld(rig.Corpse)) return;
+		if (rig != null && (IsDragHeld(rig.Corpse) || IsHandoffHeld(rig.Corpse))) return;
 		if (rig == null || (!rig.Active && !rig.Dormant))
 		{
 			return;
@@ -4161,11 +4184,13 @@ internal static partial class ShadowRagdollWorld
 		{
 			return;
 		}
+		// A held corpse's core natives belong to the handoff consumer: restore only what Rupture still owns (weapon, detached effects).
+		bool handoffHeld = IsHandoffHeld(rig.Corpse);
 		if (rig.Committed)
 		{
 			foreach (ShadowBody body in rig.Bodies)
 			{
-				if (!body.NativeHandedOff || body.Native == null || body.Proxy == null)
+				if (!body.NativeHandedOff || body.Native == null || body.Proxy == null || (handoffHeld && !ReferenceEquals(body, rig.WeaponBody)))
 				{
 					continue;
 				}
@@ -4205,6 +4230,7 @@ internal static partial class ShadowRagdollWorld
 			return;
 		}
 		InvalidateRigDrag(rig);
+		InvalidateRigHandoff(rig);
 		if (restoreNative && (rig.Active || rig.Dormant))
 		{
 			AbortToNative(rig, "raid reset", log: false);

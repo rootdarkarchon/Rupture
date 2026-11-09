@@ -12,7 +12,7 @@ public static class CorpseDragV1
 	private static int _mainThread;
 	public static int AbiVersion => 1;
 	internal static void InitializeThread() => _mainThread = Thread.CurrentThread.ManagedThreadId;
-	private static bool OnMainThread => _mainThread != 0 && Thread.CurrentThread.ManagedThreadId == _mainThread;
+	internal static bool OnMainThread => _mainThread != 0 && Thread.CurrentThread.ManagedThreadId == _mainThread;
 
 	public static DragResult Inspect(Corpse corpse, out CorpseControlInfo info)
 	{

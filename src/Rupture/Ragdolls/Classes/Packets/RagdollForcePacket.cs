@@ -7,6 +7,7 @@ public struct RagdollForceData
 	public int PlayerId;
 	public string ProfileId;
 	public uint DeathSequence;
+	public uint OwnershipEpoch;
 	public uint EventSequence;
 	public string BodyPath;
 	public byte Operation;

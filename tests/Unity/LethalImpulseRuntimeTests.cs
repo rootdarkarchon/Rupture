@@ -899,6 +899,7 @@ namespace Rupture.Ragdolls.Classes
         internal sealed class ExternalJointBinding
         { internal Rupture.Ragdolls.External.IExternalPhysicsJoint Joint; internal CharacterJoint NativeJoint; internal ShadowBody Body,ConnectedBody; }
         internal static bool IsDragHeld(Corpse corpse) => FixtureDragHeld;
+        internal static bool IsHandoffHeld(Corpse corpse) => false; // Lethal-impulse fixtures never hold a handoff lease.
         internal static bool FixtureDragHeld;
         private static Rupture.PhysXBackend.ExternalPhysXRuntime _externalRuntime;
         internal static Rupture.PhysXBackend.ExternalPhysXRuntime FixtureBackend => _externalRuntime;

@@ -27,6 +27,7 @@ foreach ($source in @('src/Rupture/Ragdolls/Classes/ShadowRagdollWorld.Living.cs
     [IO.File]::WriteAllText((Join-Path $project ('Assets/Living/' + $name)), $content)
 }
 $world = Get-Content -LiteralPath (Join-Path $repo 'src/Rupture/Ragdolls/Classes/ShadowRagdollWorld.cs') -Raw
+$handoff = Get-Content -LiteralPath (Join-Path $repo 'src/Rupture/Ragdolls/Classes/ShadowRagdollWorld.Handoff.cs') -Raw
 function Get-ProductionMember([string]$source, [string]$marker) {
     $memberStart = $source.IndexOf($marker, [StringComparison]::Ordinal)
     if ($memberStart -lt 0) { throw "Missing production fixture member: $marker" }
@@ -50,7 +51,7 @@ $corpseMembers = foreach ($marker in @('private sealed class ShadowBody', 'priva
     'private static void RegisterSpecialBody(', 'private static int GetHierarchyDepth(')) { Get-ProductionMember $world $marker }
 [IO.File]::WriteAllText((Join-Path $project 'Assets/Living/ShadowRagdollWorld.CorpseFixture.cs'),
     'using System; using System.Collections.Generic; using EFT; using EFT.AssetsManager; using EFT.Interactive; using UnityEngine; using Rupture.Ragdolls.External; namespace Rupture.Ragdolls.Classes { internal static partial class ShadowRagdollWorld {' +
-    ($corpseMembers -join "`n") + '} }')
+    ($corpseMembers -join "`n") + "`n" + (Get-ProductionMember $handoff 'private static bool IsSeveredJointSpawner(') + "`n// Living-sever fixtures never hold a CorpseHandoffV1 lease.`nprivate static bool IsHandoffHeld(Corpse corpse) => false;" + '} }')
 $coordinator = Get-Content -LiteralPath (Join-Path $repo 'src/Rupture/Ragdolls/Classes/RagdollCoordinator.cs') -Raw
 [IO.File]::WriteAllText((Join-Path $project 'Assets/Living/RagdollCoordinator.ColliderFixture.cs'),
     'using System; using System.Collections.Generic; using EFT; using UnityEngine; using Rupture.Dismemberment.Classes.Limbs; namespace Rupture.Ragdolls.Classes { internal static partial class RagdollCoordinator {' +

@@ -8,6 +8,7 @@ public struct RagdollForcePacket : INetSerializable
 	public int PlayerId;
 	public string ProfileId;
 	public uint DeathSequence;
+	public uint OwnershipEpoch;
 	public uint EventSequence;
 	public string BodyPath;
 	public byte Operation;
@@ -23,6 +24,7 @@ public struct RagdollForcePacket : INetSerializable
 		writer.Put(PlayerId);
 		writer.Put(ProfileId ?? string.Empty);
 		writer.Put(DeathSequence);
+		writer.Put(OwnershipEpoch);
 		writer.Put(EventSequence);
 		writer.Put(BodyPath ?? string.Empty);
 		writer.Put(Operation);
@@ -39,6 +41,7 @@ public struct RagdollForcePacket : INetSerializable
 		PlayerId = reader.GetInt();
 		ProfileId = reader.GetString();
 		DeathSequence = reader.GetUInt();
+		OwnershipEpoch = reader.GetUInt();
 		EventSequence = reader.GetUInt();
 		BodyPath = reader.GetString();
 		Operation = reader.GetByte();
@@ -54,6 +57,7 @@ public struct RagdollForcePacket : INetSerializable
         PlayerId = value.PlayerId,
         ProfileId = value.ProfileId,
         DeathSequence = value.DeathSequence,
+        OwnershipEpoch = value.OwnershipEpoch,
         EventSequence = value.EventSequence,
         BodyPath = value.BodyPath,
         Operation = value.Operation,
@@ -69,6 +73,7 @@ public struct RagdollForcePacket : INetSerializable
         PlayerId = value.PlayerId,
         ProfileId = value.ProfileId,
         DeathSequence = value.DeathSequence,
+        OwnershipEpoch = value.OwnershipEpoch,
         EventSequence = value.EventSequence,
         BodyPath = value.BodyPath,
         Operation = value.Operation,

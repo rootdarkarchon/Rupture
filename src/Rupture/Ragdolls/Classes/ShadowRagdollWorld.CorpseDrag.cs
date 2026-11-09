@@ -85,6 +85,7 @@ internal static partial class ShadowRagdollWorld
 	{
 		lease = 0;
 		if (!DragInputBuffer.ValidBegin(request)) return DragResult.InvalidArgument;
+		if (IsHandoffHeld(corpse)) return DragResult.Busy;
 		DragResult result = InspectDrag(corpse, out CorpseControlInfo info);
 		if (result != DragResult.Ok) return result;
 		if (!info.IsAuthority) return DragResult.NotAuthority;

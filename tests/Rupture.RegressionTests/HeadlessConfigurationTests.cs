@@ -30,7 +30,7 @@ internal static class HeadlessConfigurationTests
         object Packet(string session, string[] values, bool requester = true, uint revision = 0)
         {
             object packet = Activator.CreateInstance(hello);
-            hello.GetField("Protocol").SetValue(packet, 15);
+            hello.GetField("Protocol").SetValue(packet, 16);
             hello.GetField("Version").SetValue(packet, bridge.GetName().Version.ToString(3));
             hello.GetField("Session").SetValue(packet, session);
             hello.GetField("IsHeadlessRequester").SetValue(packet, requester);

@@ -7,6 +7,7 @@ public struct RagdollPoseSnapshotData
 	public int PlayerId;
 	public string ProfileId;
 	public uint DeathSequence;
+	public uint OwnershipEpoch;
 	public uint SnapshotSequence;
 	public float AuthorityTime;
 	public float SimulationDeltaTime;

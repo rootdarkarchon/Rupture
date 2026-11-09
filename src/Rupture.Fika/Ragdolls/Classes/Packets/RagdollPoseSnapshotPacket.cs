@@ -8,6 +8,7 @@ public struct RagdollPoseSnapshotPacket : INetSerializable
 	public int PlayerId;
 	public string ProfileId;
 	public uint DeathSequence;
+	public uint OwnershipEpoch;
 	public uint SnapshotSequence;
 	public float AuthorityTime;
 	public float SimulationDeltaTime;
@@ -21,6 +22,7 @@ public struct RagdollPoseSnapshotPacket : INetSerializable
 		writer.Put(PlayerId);
 		writer.Put(ProfileId ?? string.Empty);
 		writer.Put(DeathSequence);
+		writer.Put(OwnershipEpoch);
 		writer.Put(SnapshotSequence);
 		writer.Put(AuthorityTime);
 		writer.Put(SimulationDeltaTime);
@@ -35,6 +37,7 @@ public struct RagdollPoseSnapshotPacket : INetSerializable
 		PlayerId = reader.GetInt();
 		ProfileId = reader.GetString();
 		DeathSequence = reader.GetUInt();
+		OwnershipEpoch = reader.GetUInt();
 		SnapshotSequence = reader.GetUInt();
 		AuthorityTime = reader.GetFloat();
 		SimulationDeltaTime = reader.GetFloat();
@@ -48,6 +51,7 @@ public struct RagdollPoseSnapshotPacket : INetSerializable
         PlayerId = value.PlayerId,
         ProfileId = value.ProfileId,
         DeathSequence = value.DeathSequence,
+        OwnershipEpoch = value.OwnershipEpoch,
         SnapshotSequence = value.SnapshotSequence,
         AuthorityTime = value.AuthorityTime,
         SimulationDeltaTime = value.SimulationDeltaTime,
@@ -61,6 +65,7 @@ public struct RagdollPoseSnapshotPacket : INetSerializable
         PlayerId = value.PlayerId,
         ProfileId = value.ProfileId,
         DeathSequence = value.DeathSequence,
+        OwnershipEpoch = value.OwnershipEpoch,
         SnapshotSequence = value.SnapshotSequence,
         AuthorityTime = value.AuthorityTime,
         SimulationDeltaTime = value.SimulationDeltaTime,

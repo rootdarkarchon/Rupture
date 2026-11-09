@@ -14,7 +14,7 @@ internal static partial class ShadowRagdollWorld
     {
         joints = Array.Empty<IExternalPhysicsJoint>(); error = 0f; failure = "inactive core or missing angular capability";
         if (!AngularDrivesAvailable || ragdoll == null || targets == null || targets.Length > 32 ||
-            !RigsByRagdoll.TryGetValue(ragdoll, out ShadowRig rig) || !rig.Active || !rig.Committed || IsDragHeld(rig.Corpse)) return false;
+            !RigsByRagdoll.TryGetValue(ragdoll, out ShadowRig rig) || !rig.Active || !rig.Committed || IsDragHeld(rig.Corpse) || IsHandoffHeld(rig.Corpse)) return false;
         var selected = new List<IExternalPhysicsJoint>(targets.Length);
         var drives = new List<ExternalAngularDrive>(targets.Length);
         foreach (AngularDriveExperiment.Target target in targets)
@@ -51,7 +51,7 @@ internal static partial class ShadowRagdollWorld
     internal static bool TryObserveAngularDrives(CorpseRagdoll ragdoll, AngularDriveExperiment.Target[] targets, out float error, out float speed)
     {
         error = speed = 0f;
-        if (ragdoll == null || !RigsByRagdoll.TryGetValue(ragdoll, out ShadowRig rig) || !rig.Active || IsDragHeld(rig.Corpse)) return false;
+        if (ragdoll == null || !RigsByRagdoll.TryGetValue(ragdoll, out ShadowRig rig) || !rig.Active || IsDragHeld(rig.Corpse) || IsHandoffHeld(rig.Corpse)) return false;
         int pairs = 0;
         foreach (var target in targets)
         {

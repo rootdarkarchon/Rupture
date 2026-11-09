@@ -176,6 +176,14 @@ internal static partial class RagdollCoordinator
 		internal float NextPoseSnapshotFailureLogAt;
 		internal int PoseSnapshotsAtMotionEpochStart;
 		internal bool AuthorityMotionEpochActive;
+		internal uint OwnershipEpoch;
+		internal uint HeldHighestEpoch;
+		internal bool HandoffAdopting;
+		internal bool HasRetainedSettle;
+		internal RagdollSettleData RetainedSettle;
+		internal AuthorityPoseFrame RetainedSnapshot;
+		internal float LastAuthorityMotionAt;
+		internal float LocalPredictionStartedAt;
 		internal readonly Dictionary<string, BodyBinding> BodiesByPath = new Dictionary<string, BodyBinding>(StringComparer.Ordinal);
 		internal readonly List<CachedBodyPartBinding> BodyParts = new List<CachedBodyPartBinding>();
 		internal readonly HashSet<uint> ReceivedEvents = new HashSet<uint>();
@@ -196,6 +204,7 @@ internal static partial class RagdollCoordinator
 		internal uint NextPoseSnapshotSequence;
 		internal uint LastReceivedPoseSnapshotSequence;
 		internal uint LastDiscardedPoseSnapshotSequence;
+		internal uint OwnershipEpoch;
 	}
 
 	private static readonly Dictionary<string, RagdollState> StatesByProfile = new Dictionary<string, RagdollState>(StringComparer.Ordinal);
@@ -694,6 +703,12 @@ internal static partial class RagdollCoordinator
 			return nativeResult;
 		}
 
+		// The consumer owns the corpse's bodies while a handoff is held; EFT's own result stands.
+		if (ShadowRagdollWorld.IsHandoffHeld(corpse))
+		{
+			return nativeResult;
+		}
+
 		if (!StatesByCorpse.TryGetValue(corpse, out RagdollState state) && corpse.Ragdoll != null)
 		{
 			RegisterNativeRagdoll(corpse.Ragdoll);
@@ -774,6 +789,11 @@ internal static partial class RagdollCoordinator
 			return false;
 		}
 
+		if (IsHeld(binding.State) && !ShadowRagdollWorld.IsIndependentWeaponPath(binding.Path))
+		{
+			return false;
+		}
+
 		if (IsRemoteClient)
 		{
 			bool independentWeapon = ShadowRagdollWorld.IsIndependentWeaponPath(binding.Path);
@@ -789,13 +809,14 @@ internal static partial class RagdollCoordinator
 			RecordPredictedPointImpulse(binding.State, binding.Path,
 				rigidbody.transform.InverseTransformPoint(worldPoint), impulse);
 		}
-		if (IsNetworkAuthority && binding.State.PlayerId >= 0)
+		if (IsNetworkAuthority && binding.State.PlayerId >= 0 && !IsHeld(binding.State))
 		{
 			RagdollPointImpulseData packet = new RagdollPointImpulseData
 			{
 				PlayerId = binding.State.PlayerId,
 				ProfileId = binding.State.ProfileId,
 				DeathSequence = binding.State.DeathSequence,
+				OwnershipEpoch = binding.State.OwnershipEpoch,
 				EventSequence = NextEventSequence(),
 				BodyPath = binding.Path,
 				LocalPoint = rigidbody.transform.InverseTransformPoint(worldPoint),
@@ -829,13 +850,14 @@ internal static partial class RagdollCoordinator
 			return false;
 		}
 		if (IsRemoteClient) RecordPredictedPointImpulse(state, bodyPath, localPoint, impulse);
-		if (IsNetworkAuthority && state.PlayerId >= 0)
+		if (IsNetworkAuthority && state.PlayerId >= 0 && !IsHeld(state))
 		{
 			RagdollPointImpulseData packet = new RagdollPointImpulseData
 			{
 				PlayerId = state.PlayerId,
 				ProfileId = state.ProfileId,
 				DeathSequence = state.DeathSequence,
+				OwnershipEpoch = state.OwnershipEpoch,
 				EventSequence = NextEventSequence(),
 				BodyPath = bodyPath,
 				LocalPoint = localPoint,
@@ -864,13 +886,14 @@ internal static partial class RagdollCoordinator
 			return false;
 		}
 		if (IsRemoteClient) RecordPredictedPointImpulse(state, bodyPath, localPoint, impulse);
-		if (state != null && IsNetworkAuthority && state.PlayerId >= 0)
+		if (state != null && IsNetworkAuthority && state.PlayerId >= 0 && !IsHeld(state))
 		{
 			RagdollPointImpulseData packet = new RagdollPointImpulseData
 			{
 				PlayerId = state.PlayerId,
 				ProfileId = state.ProfileId,
 				DeathSequence = state.DeathSequence,
+				OwnershipEpoch = state.OwnershipEpoch,
 				EventSequence = NextEventSequence(),
 				BodyPath = bodyPath,
 				LocalPoint = localPoint,
@@ -884,6 +907,7 @@ internal static partial class RagdollCoordinator
 	private static bool BeginLocalPrediction(RagdollState state, bool independentWeaponOnly)
 	{
 		if (!IsRemoteClient || state?.Corpse == null) return false;
+		if (!independentWeaponOnly && IsHeld(state)) return false;
 		if (!independentWeaponOnly && IsStopped(state))
 		{
 			ReactivateState(state, state.DynamicDuration);
@@ -901,7 +925,9 @@ internal static partial class RagdollCoordinator
 		}
 		state.AuthorityPlaybackSequenceBarrier = state.LastReceivedPoseSnapshotSequence;
 		ClearAuthorityPlayback(state, advanceBarrier: false);
-		return ShadowRagdollWorld.BeginLocalPrediction(state.Corpse, independentWeaponOnly);
+		bool begun = ShadowRagdollWorld.BeginLocalPrediction(state.Corpse, independentWeaponOnly);
+		if (begun && !independentWeaponOnly) state.LocalPredictionStartedAt = Time.realtimeSinceStartup;
+		return begun;
 	}
 
 	private static void RecordPredictedPointImpulse(RagdollState state, string bodyPath, Vector3 localPoint, Vector3 impulse)
@@ -1078,7 +1104,7 @@ internal static partial class RagdollCoordinator
 
 	internal static void SendShadowForce(Corpse corpse, string bodyPath, ShadowForceOperation operation, Vector3 force, Vector3 point, float scalar, float radius, float upwardsModifier, ForceMode mode)
 	{
-		if (!IsNetworkAuthority || corpse == null || string.IsNullOrEmpty(bodyPath) || !StatesByCorpse.TryGetValue(corpse, out RagdollState state) || IsStopped(state) || state.PlayerId < 0)
+		if (!IsNetworkAuthority || corpse == null || string.IsNullOrEmpty(bodyPath) || !StatesByCorpse.TryGetValue(corpse, out RagdollState state) || IsStopped(state) || state.PlayerId < 0 || IsHeld(state))
 		{
 			return;
 		}
@@ -1087,6 +1113,7 @@ internal static partial class RagdollCoordinator
 			PlayerId = state.PlayerId,
 			ProfileId = state.ProfileId,
 			DeathSequence = state.DeathSequence,
+			OwnershipEpoch = state.OwnershipEpoch,
 			EventSequence = NextEventSequence(),
 			BodyPath = bodyPath,
 			Operation = (byte)operation,
@@ -1102,7 +1129,7 @@ internal static partial class RagdollCoordinator
 
 	internal static void SendShadowWake(Corpse corpse)
 	{
-		if (!IsNetworkAuthority || corpse == null || !StatesByCorpse.TryGetValue(corpse, out RagdollState state) || IsStopped(state) || state.PlayerId < 0)
+		if (!IsNetworkAuthority || corpse == null || !StatesByCorpse.TryGetValue(corpse, out RagdollState state) || IsStopped(state) || state.PlayerId < 0 || IsHeld(state))
 		{
 			return;
 		}
@@ -1111,6 +1138,7 @@ internal static partial class RagdollCoordinator
 			PlayerId = state.PlayerId,
 			ProfileId = state.ProfileId,
 			DeathSequence = state.DeathSequence,
+			OwnershipEpoch = state.OwnershipEpoch,
 			EventSequence = NextEventSequence(),
 			ReactivateSettled = 0,
 			DynamicDuration = state.DynamicDuration
@@ -1120,7 +1148,7 @@ internal static partial class RagdollCoordinator
 
 	private static void SendReactivationWake(RagdollState state)
 	{
-		if (!IsNetworkAuthority || state == null || state.PlayerId < 0 || state.DeathSequence == 0)
+		if (!IsNetworkAuthority || state == null || state.PlayerId < 0 || state.DeathSequence == 0 || IsHeld(state))
 		{
 			return;
 		}
@@ -1129,6 +1157,7 @@ internal static partial class RagdollCoordinator
 			PlayerId = state.PlayerId,
 			ProfileId = state.ProfileId,
 			DeathSequence = state.DeathSequence,
+			OwnershipEpoch = state.OwnershipEpoch,
 			EventSequence = NextEventSequence(),
 			ReactivateSettled = 1,
 			DynamicDuration = state.DynamicDuration
@@ -1149,7 +1178,7 @@ internal static partial class RagdollCoordinator
 	private static void SendPoseSnapshot(RagdollState state, bool force = false)
 	{
 		if (!IsNetworkAuthority || state?.Corpse == null || state.PlayerId < 0 || state.DeathSequence == 0 ||
-			!MultiplayerRuntime.Current.HasServer)
+			!MultiplayerRuntime.Current.HasServer || IsHeld(state))
 		{
 			return;
 		}
@@ -1179,6 +1208,7 @@ internal static partial class RagdollCoordinator
 				PlayerId = state.PlayerId,
 				ProfileId = state.ProfileId,
 				DeathSequence = state.DeathSequence,
+				OwnershipEpoch = state.OwnershipEpoch,
 				SnapshotSequence = snapshotSequence,
 				AuthorityTime = authorityTime,
 				SimulationDeltaTime = simulationDeltaTime,
@@ -1335,12 +1365,12 @@ internal static partial class RagdollCoordinator
 
 	internal static bool IsDynamicState(object stateToken)
 	{
-		return stateToken is RagdollState state && !IsStopped(state) && HasDynamicBody(state);
+		return stateToken is RagdollState state && !IsStopped(state) && !IsHeld(state) && HasDynamicBody(state);
 	}
 
 	internal static int ApplyAuthorityRadialImpulse(object stateToken, Vector3 origin, float radius, float force)
 	{
-		if (!(stateToken is RagdollState state) || (!IsRemoteClient && IsStopped(state)))
+		if (!(stateToken is RagdollState state) || (!IsRemoteClient && IsStopped(state)) || IsHeld(state))
 		{
 			return 0;
 		}
@@ -1358,13 +1388,14 @@ internal static partial class RagdollCoordinator
 				ExpiresAt = Time.realtimeSinceStartup + PredictedEventEchoLifetimeSeconds
 			});
 		}
-		if (IsNetworkAuthority && state.PlayerId >= 0)
+		if (IsNetworkAuthority && state.PlayerId >= 0 && !IsHeld(state))
 		{
 			RagdollRadialImpulseData packet = new RagdollRadialImpulseData
 			{
 				PlayerId = state.PlayerId,
 				ProfileId = state.ProfileId,
 				DeathSequence = state.DeathSequence,
+				OwnershipEpoch = state.OwnershipEpoch,
 				EventSequence = NextEventSequence(),
 				Origin = origin,
 				Radius = radius,
@@ -1421,6 +1452,13 @@ internal static partial class RagdollCoordinator
 			return;
 		}
 
+		EpochAction epochAction = ClassifyIncomingEpoch(state, packet.OwnershipEpoch);
+		if (epochAction == EpochAction.Drop)
+		{
+			return;
+		}
+		NoteAuthorityMotion(state);
+
 		state.DeathSequence = packet.DeathSequence;
 		state.PlayerId = packet.PlayerId;
 		state.BodyPart = packet.BodyPart;
@@ -1429,13 +1467,20 @@ internal static partial class RagdollCoordinator
 		state.StartReceived = true;
 		state.DeathStartedAt = state.DeathStartedAt > 0f ? state.DeathStartedAt : Time.realtimeSinceStartup;
 		state.LifecycleExpiresAt = Time.realtimeSinceStartup + PendingLifetimeSeconds;
+		StatesByPlayerId[packet.PlayerId] = state;
+		if (epochAction == EpochAction.Retain)
+		{
+			// Held: Start is identity, not motion. It is recorded so the retained settle/snapshot can
+			// replay later, but no launch velocity or queued event reaches the quiesced rig.
+			return;
+		}
+
 		state.InitialVelocityPending = packet.HasInitialVelocity && IsFinite(packet.InitialVelocity);
 		if (state.InitialVelocityPending)
 		{
 			state.InitialVelocityApplied = false;
 		}
 		state.InitialVelocity = packet.InitialVelocity;
-		StatesByPlayerId[packet.PlayerId] = state;
 		ActivatePendingSettle(state);
 		ApplyInitialVelocity(state);
 		ApplyPendingImpulses(state);
@@ -1456,6 +1501,10 @@ internal static partial class RagdollCoordinator
 
 		RagdollState state = GetOrCreateState(packet.ProfileId, packet.PlayerId, packet.DeathSequence);
 		if (!RagdollSequencePolicy.TryAcceptEvent(state.DeathSequence, packet.DeathSequence, packet.EventSequence, state.ReceivedEvents))
+		{
+			return;
+		}
+		if (ClassifyIncomingEpoch(state, packet.OwnershipEpoch) != EpochAction.Handle)
 		{
 			return;
 		}
@@ -1486,6 +1535,10 @@ internal static partial class RagdollCoordinator
 		{
 			return;
 		}
+		if (ClassifyIncomingEpoch(state, packet.OwnershipEpoch) != EpochAction.Handle)
+		{
+			return;
+		}
 		if (ConsumePredictedRadialImpulse(state, packet)) return;
 
 		PendingRadialImpulse pending = new PendingRadialImpulse
@@ -1512,6 +1565,10 @@ internal static partial class RagdollCoordinator
 
 		RagdollState state = GetOrCreateState(packet.ProfileId, packet.PlayerId, packet.DeathSequence);
 		if (!RagdollSequencePolicy.TryAcceptEvent(state.DeathSequence, packet.DeathSequence, packet.EventSequence, state.ReceivedEvents))
+		{
+			return;
+		}
+		if (ClassifyIncomingEpoch(state, packet.OwnershipEpoch) != EpochAction.Handle)
 		{
 			return;
 		}
@@ -1548,14 +1605,23 @@ internal static partial class RagdollCoordinator
 		}
 		RagdollState state = GetOrCreateState(packet.ProfileId, packet.PlayerId, packet.DeathSequence);
 		RestoreMotionSequences(state, restoredMotion);
+		if (reactivation)
+		{
+			// Bound before epoch classification so the held predicate sees the corpse.
+			BindStateToRetainedCorpse(state);
+		}
 		if (!RagdollSequencePolicy.TryAcceptEvent(state.DeathSequence, packet.DeathSequence, packet.EventSequence, state.ReceivedEvents))
 		{
 			return;
 		}
+		if (ClassifyIncomingEpoch(state, packet.OwnershipEpoch) != EpochAction.Handle)
+		{
+			return;
+		}
+		NoteAuthorityMotion(state);
 		if (reactivation)
 		{
 			state.StartReceived = true;
-			BindStateToRetainedCorpse(state);
 			ReactivateState(state, CorpseSleepPolicy.ClampDuration(packet.DynamicDuration));
 		}
 		state.PendingShadowWakes.Add(new PendingShadowWake
@@ -1573,7 +1639,9 @@ internal static partial class RagdollCoordinator
 		{
 			return;
 		}
-		if (RejectRetiredSequence(packet.ProfileId, packet.PlayerId, packet.DeathSequence))
+		RagdollTombstone restoredMotion = null;
+		if (RejectRetiredSequence(packet.ProfileId, packet.PlayerId, packet.DeathSequence) &&
+			!TryRestoreRetiredForNewerEpoch(packet.ProfileId, packet.PlayerId, packet.DeathSequence, packet.OwnershipEpoch, out restoredMotion))
 		{
 			return;
 		}
@@ -1583,7 +1651,29 @@ internal static partial class RagdollCoordinator
 		{
 			return;
 		}
+		if (restoredMotion != null)
+		{
+			BindRestoredRetiredState(state, restoredMotion);
+		}
 
+		EpochAction epochAction = ClassifyIncomingEpoch(state, packet.OwnershipEpoch);
+		if (epochAction == EpochAction.Drop)
+		{
+			return;
+		}
+		if (epochAction == EpochAction.Retain)
+		{
+			RetainSettle(state, packet);
+			return;
+		}
+
+		NoteAuthorityMotion(state);
+		AcceptSettle(state, packet, replay: false);
+	}
+
+	// Replay is the only caller that bypasses the receive-order gate: the retained settle was already ordered.
+	private static void AcceptSettle(RagdollState state, RagdollSettleData packet, bool replay)
+	{
 		state.PendingPose = packet.Poses ?? Array.Empty<RagdollPose>();
 		for (int index = 0; index < state.PendingPose.Length; index++)
 		{
@@ -1603,10 +1693,13 @@ internal static partial class RagdollCoordinator
 			$"lastSnapshot={state.LastReceivedPoseSnapshotSequence}, terminalBodies={state.PendingPose.Length}.");
 		if (ShadowRagdollWorld.RequiresAuthorityStateBoundary)
 		{
-			if (IsNewerSnapshotSequence(state.LastReceivedPoseSnapshotSequence, packet.SnapshotSequence) &&
-				IsNewerSnapshotSequence(state.AuthorityPlaybackSequenceBarrier, packet.SnapshotSequence))
+			if (replay || (IsNewerSnapshotSequence(state.LastReceivedPoseSnapshotSequence, packet.SnapshotSequence) &&
+				IsNewerSnapshotSequence(state.AuthorityPlaybackSequenceBarrier, packet.SnapshotSequence)))
 			{
-				state.LastReceivedPoseSnapshotSequence = packet.SnapshotSequence;
+				if (IsNewerSnapshotSequence(state.LastReceivedPoseSnapshotSequence, packet.SnapshotSequence))
+				{
+					state.LastReceivedPoseSnapshotSequence = packet.SnapshotSequence;
+				}
 				QueueAuthorityFrame(state, new AuthorityPoseFrame
 				{
 					SnapshotSequence = packet.SnapshotSequence,
@@ -1636,7 +1729,9 @@ internal static partial class RagdollCoordinator
 			_poseSnapshotsRejected++;
 			return;
 		}
-		if (RejectRetiredSequence(packet.ProfileId, packet.PlayerId, packet.DeathSequence))
+		RagdollTombstone restoredMotion = null;
+		if (RejectRetiredSequence(packet.ProfileId, packet.PlayerId, packet.DeathSequence) &&
+			!TryRestoreRetiredForNewerEpoch(packet.ProfileId, packet.PlayerId, packet.DeathSequence, packet.OwnershipEpoch, out restoredMotion))
 		{
 			_poseSnapshotsRejected++;
 			return;
@@ -1647,6 +1742,10 @@ internal static partial class RagdollCoordinator
 		{
 			_poseSnapshotsRejected++;
 			return;
+		}
+		if (restoredMotion != null)
+		{
+			BindRestoredRetiredState(state, restoredMotion);
 		}
 		for (int index = 0; index < packet.Poses.Length; index++)
 		{
@@ -1660,6 +1759,18 @@ internal static partial class RagdollCoordinator
 				_poseSnapshotsRejected++;
 				return;
 			}
+		}
+
+		EpochAction epochAction = ClassifyIncomingEpoch(state, packet.OwnershipEpoch);
+		if (epochAction == EpochAction.Drop)
+		{
+			_poseSnapshotsRejected++;
+			return;
+		}
+		if (restoredMotion != null)
+		{
+			// A retired client is stopped; the authority moved again, so follow it like a reactivation wake.
+			ReactivateState(state, state.DynamicDuration);
 		}
 
 		PendingPoseSnapshotAssembly assembly = state.PendingPoseSnapshotAssembly;
@@ -1717,14 +1828,22 @@ internal static partial class RagdollCoordinator
 		_poseSnapshotsReceived++;
 		state.PoseSnapshotsReceived++;
 		state.LastReceivedPoseSnapshotSequence = packet.SnapshotSequence;
-		QueueAuthorityFrame(state, new AuthorityPoseFrame
+		AuthorityPoseFrame frame = new AuthorityPoseFrame
 		{
 			SnapshotSequence = packet.SnapshotSequence,
 			AuthorityTime = assembly.AuthorityTime,
 			SimulationDeltaTime = assembly.SimulationDeltaTime,
 			Poses = completePoses,
 			Terminal = false
-		});
+		};
+		if (epochAction == EpochAction.Retain)
+		{
+			// Held: the newest complete snapshot waits for the local adoption instead of queueing playback.
+			state.RetainedSnapshot = frame;
+			return;
+		}
+		NoteAuthorityMotion(state);
+		QueueAuthorityFrame(state, frame);
 	}
 
 	internal static void Receive(DismembermentData packet)
@@ -1783,6 +1902,11 @@ internal static partial class RagdollCoordinator
 			if (state.Player?.HealthController != null && state.Player.HealthController.IsAlive)
 			{
 				state.ObservedAliveAfterDeath = true;
+			}
+			if (IsHeld(state))
+			{
+				// Handoff owns the corpse until adoption: no auto-stop, settle sends, parking or retirement.
+				continue;
 			}
 			if (FreezeCorpseRagdollsForWoundDebug && state.Ragdoll != null)
 			{
@@ -1909,6 +2033,11 @@ internal static partial class RagdollCoordinator
 		{
 			return;
 		}
+		if (IsHeld(state))
+		{
+			// Start is identity, not motion: a held corpse still announces itself, without launch velocity.
+			hasInitialVelocity = false;
+		}
 		if (state.SettleSent && state.StartSent)
 		{
 			return;
@@ -1923,6 +2052,7 @@ internal static partial class RagdollCoordinator
 			PlayerId = state.PlayerId,
 			ProfileId = state.ProfileId,
 			DeathSequence = state.DeathSequence,
+			OwnershipEpoch = state.OwnershipEpoch,
 			BodyPart = state.BodyPart,
 			HitDirection = state.HitDirection,
 			DynamicDuration = state.DynamicDuration,
@@ -1936,7 +2066,7 @@ internal static partial class RagdollCoordinator
 
 	private static void SendSettle(RagdollState state)
 	{
-		if (state == null || state.SettleSent)
+		if (state == null || state.SettleSent || IsHeld(state))
 		{
 			return;
 		}
@@ -1954,6 +2084,7 @@ internal static partial class RagdollCoordinator
 			PlayerId = state.PlayerId,
 			ProfileId = state.ProfileId,
 			DeathSequence = state.DeathSequence,
+			OwnershipEpoch = state.OwnershipEpoch,
 			SnapshotSequence = state.NextPoseSnapshotSequence,
 			AuthorityTime = authorityTime,
 			SimulationDeltaTime = simulationDeltaTime,
@@ -2112,14 +2243,8 @@ internal static partial class RagdollCoordinator
 
 	private static void RegisterBodies(RagdollState state)
 	{
-		foreach (BodyBinding oldBinding in state.BodiesByPath.Values)
-		{
-			if (oldBinding.Rigidbody != null)
-			{
-				BindingsByRigidbody.Remove(oldBinding.Rigidbody);
-			}
-		}
-		state.BodiesByPath.Clear();
+		// ReferenceEquals-based: the previous natives may already be destroyed (adoption), where `!= null` skips them.
+		DetachBodyBindings(state);
 
 		RigidbodySpawner[] spawners = state.Ragdoll?._rigidbodySpawners;
 		if (spawners == null)
@@ -2385,7 +2510,7 @@ internal static partial class RagdollCoordinator
 	private static void ApplyAuthorityPlayback(RagdollState state)
 	{
 		if (state == null || !IsRemoteClient || state.Corpse == null ||
-			state.AuthorityPlaybackFrames.Count == 0) return;
+			state.AuthorityPlaybackFrames.Count == 0 || IsHeld(state)) return;
 
 		float now = Time.realtimeSinceStartup;
 		bool justActivated = false;
@@ -2412,6 +2537,7 @@ internal static partial class RagdollCoordinator
 			state.AuthorityPlaybackUpdatedAt = now;
 			state.AuthorityPlaybackLastAppliedTime = float.MinValue;
 			justActivated = true;
+			state.LocalPredictionStartedAt = 0f;
 		}
 		else
 		{
@@ -2516,6 +2642,7 @@ internal static partial class RagdollCoordinator
 		state.SettlePending = false;
 		PendingSettleStates.Remove(state);
 		state.SettleReceived = true;
+		state.LocalPredictionStartedAt = 0f;
 		state.StopRequested = true;
 		DiscardPendingPoseSnapshotAssembly(state);
 		state.PoseApplied = true;
@@ -3013,7 +3140,7 @@ internal static partial class RagdollCoordinator
 
 	private static void ApplyPendingSettleNow(RagdollState state)
 	{
-		if (state == null || !state.SettlePending || (IsRemoteClient && !state.StartReceived)) return;
+		if (state == null || !state.SettlePending || (IsRemoteClient && !state.StartReceived) || IsHeld(state)) return;
 
 		bool settled = state.PendingPose == null || state.PendingPose.Length == 0
 			? ShadowRagdollWorld.ForceSettle(state.Corpse)
@@ -3026,6 +3153,7 @@ internal static partial class RagdollCoordinator
 		state.SettlePending = false;
 		PendingSettleStates.Remove(state);
 		state.SettleReceived = true;
+		state.LocalPredictionStartedAt = 0f;
 		state.StopRequested = true;
 		DiscardPendingPoseSnapshotAssembly(state);
 		ClearPendingPoseSnapshot(state);
@@ -3044,6 +3172,7 @@ internal static partial class RagdollCoordinator
 			StatesByCorpse.Remove(state.Corpse);
 		}
 		state.DeathSequence = deathSequence;
+		ResetHandoffState(state);
 		state.Corpse = null;
 		state.Ragdoll = null;
 		state.PlayerBody = state.Player?.PlayerBody;
@@ -3142,7 +3271,8 @@ internal static partial class RagdollCoordinator
 			DeathSequence = state.DeathSequence,
 			NextPoseSnapshotSequence = state.NextPoseSnapshotSequence,
 			LastReceivedPoseSnapshotSequence = state.LastReceivedPoseSnapshotSequence,
-			LastDiscardedPoseSnapshotSequence = state.LastDiscardedPoseSnapshotSequence
+			LastDiscardedPoseSnapshotSequence = state.LastDiscardedPoseSnapshotSequence,
+			OwnershipEpoch = state.OwnershipEpoch
 		};
 		DetachState(state);
 		if (!string.IsNullOrEmpty(tombstone.ProfileId))
@@ -3165,6 +3295,7 @@ internal static partial class RagdollCoordinator
 		state.PendingPose = null;
 		state.BodyParts.Clear();
 		ClearPendingPoseSnapshot(state);
+		ClearHandoffRetention(state);
 		state.ReceivedEvents.Clear();
 		state.PendingPointImpulses.Clear();
 		state.PendingRadialImpulses.Clear();

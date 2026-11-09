@@ -50,9 +50,9 @@ internal static class ImpactWireTests
         Type network = assembly.GetType("Rupture.Impacts.FikaImpactNetwork",true);
         MethodInfo compatible = network.GetMethod("Compatible",Flags);
         string release = assembly.GetName().Version.ToString(3);
-        Check((bool)compatible.Invoke(null,new object[] {15,release}) &&
-            !(bool)compatible.Invoke(null,new object[] {15,"1.2.2"}) && !(bool)compatible.Invoke(null,new object[] {15,"1.3.0"}) &&
-            !(bool)compatible.Invoke(null,new object[] {15,release + "-mismatch"}) && !(bool)compatible.Invoke(null,new object[] {14,release}) &&
+        Check((bool)compatible.Invoke(null,new object[] {16,release}) &&
+            !(bool)compatible.Invoke(null,new object[] {16,"1.2.2"}) && !(bool)compatible.Invoke(null,new object[] {16,"1.3.0"}) && !(bool)compatible.Invoke(null,new object[] {16,"1.3.1"}) &&
+            !(bool)compatible.Invoke(null,new object[] {16,release + "-mismatch"}) && !(bool)compatible.Invoke(null,new object[] {15,release}) && !(bool)compatible.Invoke(null,new object[] {14,release}) &&
             !(bool)compatible.Invoke(null,new object[] {14,"1.2.2"}) && !(bool)compatible.Invoke(null,new object[] {13,"1.2.2"}) && !(bool)compatible.Invoke(null,new object[] {12,"1.2.2"}) && !(bool)compatible.Invoke(null,new object[] {11,"1.2.2"}) && !(bool)compatible.Invoke(null,new object[] {10,"1.2.0"}) &&
             !(bool)compatible.Invoke(null,new object[] {9,"1.1.6"}) && !(bool)compatible.Invoke(null,new object[] {4,"1.1.6"}) &&
             !(bool)compatible.Invoke(null,new object[] {5,"1.1.6"}) && !(bool)compatible.Invoke(null,new object[] {6,"1.1.0"}) &&

@@ -28,7 +28,7 @@ using MainThreadStage = Rupture.Ragdolls.Classes.ShadowRagdollWorld.MainThreadSt
 
 namespace Rupture;
 
-[BepInPlugin("com.rootdarkarchon.rupture", "Rupture", "1.3.1")]
+[BepInPlugin("com.rootdarkarchon.rupture", "Rupture", "1.4.0")]
 [BepInDependency("com.fika.core", BepInDependency.DependencyFlags.SoftDependency)]
 [BepInDependency("com.janky.hollywoodfx", BepInDependency.DependencyFlags.SoftDependency)]
 [DefaultExecutionOrder(32000)]
@@ -93,7 +93,7 @@ public class RupturePlugin : BaseUnityPlugin
 		ConsoleScreen.Processor.RegisterCommand("RPTAngularDump", AngularDriveExperiment.Dump);
 		ConsoleScreen.Processor.RegisterCommand("RPTShadowStatus", ShadowRagdollWorld.LogStatus);
 		ConsoleScreen.Processor.RegisterCommand("RPTHeadWoundStatus", HeadWoundSystem.LogStatus);
-		Log.Initialization("Rupture 1.3.1 initialized. Performance trace schema=12 (half-second soaking, sleep-aware physics, 4 Hz movable-root polling). Runtime diagnostics require Enable Debug Logging.");
+		Log.Initialization("Rupture 1.4.0 initialized. Performance trace schema=12 (half-second soaking, sleep-aware physics, 4 Hz movable-root polling). Runtime diagnostics require Enable Debug Logging.");
 	}
 
 	private static void EnableNativeRagdollIntegration()

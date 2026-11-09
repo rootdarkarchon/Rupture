@@ -7,6 +7,7 @@ public struct RagdollWakePacket : INetSerializable
 	public int PlayerId;
 	public string ProfileId;
 	public uint DeathSequence;
+	public uint OwnershipEpoch;
 	public uint EventSequence;
 	public byte ReactivateSettled;
 	public int DynamicDuration;
@@ -16,6 +17,7 @@ public struct RagdollWakePacket : INetSerializable
 		writer.Put(PlayerId);
 		writer.Put(ProfileId ?? string.Empty);
 		writer.Put(DeathSequence);
+		writer.Put(OwnershipEpoch);
 		writer.Put(EventSequence);
 		writer.Put(ReactivateSettled);
 		writer.Put(DynamicDuration);
@@ -26,6 +28,7 @@ public struct RagdollWakePacket : INetSerializable
 		PlayerId = reader.GetInt();
 		ProfileId = reader.GetString();
 		DeathSequence = reader.GetUInt();
+		OwnershipEpoch = reader.GetUInt();
 		EventSequence = reader.GetUInt();
 		ReactivateSettled = reader.GetByte();
 		DynamicDuration = reader.GetInt();
@@ -35,6 +38,7 @@ public struct RagdollWakePacket : INetSerializable
         PlayerId = value.PlayerId,
         ProfileId = value.ProfileId,
         DeathSequence = value.DeathSequence,
+        OwnershipEpoch = value.OwnershipEpoch,
         EventSequence = value.EventSequence,
         ReactivateSettled = value.ReactivateSettled,
         DynamicDuration = value.DynamicDuration,
@@ -44,6 +48,7 @@ public struct RagdollWakePacket : INetSerializable
         PlayerId = value.PlayerId,
         ProfileId = value.ProfileId,
         DeathSequence = value.DeathSequence,
+        OwnershipEpoch = value.OwnershipEpoch,
         EventSequence = value.EventSequence,
         ReactivateSettled = value.ReactivateSettled,
         DynamicDuration = value.DynamicDuration,

@@ -73,6 +73,47 @@ internal static class PacketCompatibilityTests
         Console.WriteLine("Captured " + records.Count + " baseline packet fixtures.");
     }
 
+    // Protocol 16 inserts OwnershipEpoch after DeathSequence on the seven ragdoll packets. Their layout
+    // therefore differs from the frozen protocol-4 bytes; they are verified as current layouts instead.
+    private static bool IsCurrentRagdollLayout(Type type) =>
+        type.Namespace == "Rupture.Ragdolls.Classes.Packets" && type.Name.StartsWith("Ragdoll", StringComparison.Ordinal);
+
+    private static void CheckCurrentRagdollLayout(Type type, object wire)
+    {
+        FieldInfo[] fields = type.GetFields(BindingFlags.Instance | BindingFlags.Public);
+        int death = Array.FindIndex(fields, f => f.Name == "DeathSequence");
+        if (death < 0 || death + 1 >= fields.Length || fields[death + 1].Name != "OwnershipEpoch" || fields[death + 1].FieldType != typeof(uint))
+            throw new Exception("OwnershipEpoch must directly follow DeathSequence: " + type.FullName);
+        FieldInfo epoch = type.GetField("OwnershipEpoch");
+        uint expectedEpoch = (uint)epoch.GetValue(wire);
+        if (expectedEpoch == 0) throw new Exception("Populated ownership epoch is zero: " + type.FullName);
+
+        byte[] bytes = Serialize(wire);
+        object other = Populate(type);
+        epoch.SetValue(other, expectedEpoch + 1);
+        if (Serialize(other).SequenceEqual(bytes)) throw new Exception("Ownership epoch is not serialized: " + type.FullName);
+
+        object decoded = Activator.CreateInstance(type);
+        var reader = new NetDataReader(bytes);
+        ((INetSerializable)decoded).Deserialize(reader);
+        if (reader.AvailableBytes != 0 || !Serialize(decoded).SequenceEqual(bytes))
+            throw new Exception("Current layout did not round-trip with full consumption: " + type.FullName);
+        if ((uint)epoch.GetValue(decoded) != expectedEpoch)
+            throw new Exception("Ownership epoch lost in the wire round-trip: " + type.FullName);
+
+        var toData = type.GetMethods().Single(m => m.Name == "op_Implicit" && m.ReturnType != type);
+        var toWire = type.GetMethods().Single(m => m.Name == "op_Implicit" && m.ReturnType == type);
+        object data = toData.Invoke(null, new[] { wire });
+        if ((uint)data.GetType().GetField("OwnershipEpoch").GetValue(data) != expectedEpoch)
+            throw new Exception("Ownership epoch lost converting wire to core data: " + type.FullName);
+        object converted = toWire.Invoke(null, new[] { data });
+        if ((uint)epoch.GetValue(converted) != expectedEpoch || !Serialize(converted).SequenceEqual(bytes))
+            throw new Exception("Core/bridge conversion lost data: " + type.FullName);
+        var poses = type.GetField("Poses");
+        if (poses != null && !ReferenceEquals(poses.GetValue(wire), poses.GetValue(converted)))
+            throw new Exception("Pose conversion copied the snapshot array.");
+    }
+
     internal static void Run(Assembly bridge)
     {
         var records = JsonSerializer.Deserialize<Dictionary<string, WireRecord>>(
@@ -87,12 +128,12 @@ internal static class PacketCompatibilityTests
             if (type.Name == "RuptureHelloPacket")
             {
                 if (Id(type) != expected.Id) throw new Exception("Hello packet identifier changed");
-                type.GetField("Protocol").SetValue(wire, 15);
+                type.GetField("Protocol").SetValue(wire, 16);
                 object current = Activator.CreateInstance(type);
                 var currentReader = new NetDataReader(Serialize(wire));
                 ((INetSerializable)current).Deserialize(currentReader);
                 if (currentReader.AvailableBytes != 0 || !Serialize(wire).SequenceEqual(Serialize(current)))
-                    throw new Exception("Protocol-15 configuration hello did not roundtrip");
+                    throw new Exception("Protocol-16 configuration hello did not roundtrip");
                 // Historical configuration has a different schema and must be rejected.
                 bool rejected = false;
                 try { ((INetSerializable)current).Deserialize(new NetDataReader(Convert.FromBase64String(expected.Bytes))); }
@@ -101,7 +142,14 @@ internal static class PacketCompatibilityTests
                     .GetMethod("Compatible", BindingFlags.Static | BindingFlags.NonPublic);
                 if (!rejected && (bool)compatible.Invoke(null, new[] { type.GetField("Protocol").GetValue(current), type.GetField("Version").GetValue(current) }))
                     throw new Exception("Historical protocol-4 configuration was accepted by the handshake");
-                Console.WriteLine("PASS: unchanged hello identity, protocol-15 configuration and historical protocol rejection");
+                Console.WriteLine("PASS: unchanged hello identity, protocol-16 configuration and historical protocol rejection");
+                continue;
+            }
+            if (IsCurrentRagdollLayout(type))
+            {
+                if (Id(type) != expected.Id) throw new Exception("Wire identity changed: " + type.FullName);
+                CheckCurrentRagdollLayout(type, wire);
+                Console.WriteLine("PASS: protocol-4 identifier, protocol-16 ownership-epoch round-trip and data conversion: " + type.Name);
                 continue;
             }
             if (Id(type) != expected.Id || Convert.ToBase64String(Serialize(wire)) != expected.Bytes)

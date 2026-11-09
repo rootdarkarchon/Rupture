@@ -8,6 +8,7 @@ public struct RagdollStartData
 	public int PlayerId;
 	public string ProfileId;
 	public uint DeathSequence;
+	public uint OwnershipEpoch;
 	public EBodyPart BodyPart;
 	public Vector3 HitDirection;
 	public int DynamicDuration;

@@ -94,9 +94,11 @@ internal static class GrenadePhysics
 		// A settled corpse can retain a naturally sleeping independent weapon even
 		// when corpse impact reactivation is disabled. That weapon no longer has a
 		// dynamic coordinator state, so address it through the retained shadow rig.
+		// A handed-off corpse keeps its independent weapon under Rupture; the radial
+		// path applies only to that weapon while the core is held.
 		foreach (Corpse corpse in AffectedCorpses)
 		{
-			if (!RagdollCoordinator.IsRemoteClient && ShadowRagdollWorld.IsSettled(corpse) &&
+			if (!RagdollCoordinator.IsRemoteClient && (ShadowRagdollWorld.IsSettled(corpse) || ShadowRagdollWorld.IsHandoffHeld(corpse)) &&
 				ShadowRagdollWorld.TryApplyRadialImpulse(corpse, grenadePosition, radius, force, out int independentBodies))
 			{
 				appliedBodies += independentBodies;

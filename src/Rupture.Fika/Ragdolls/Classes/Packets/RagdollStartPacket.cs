@@ -9,6 +9,7 @@ public struct RagdollStartPacket : INetSerializable
 	public int PlayerId;
 	public string ProfileId;
 	public uint DeathSequence;
+	public uint OwnershipEpoch;
 	public EBodyPart BodyPart;
 	public Vector3 HitDirection;
 	public int DynamicDuration;
@@ -20,6 +21,7 @@ public struct RagdollStartPacket : INetSerializable
 		writer.Put(PlayerId);
 		writer.Put(ProfileId ?? string.Empty);
 		writer.Put(DeathSequence);
+		writer.Put(OwnershipEpoch);
 		writer.Put((byte)BodyPart);
 		writer.PutUnmanaged(HitDirection);
 		writer.Put(DynamicDuration);
@@ -32,6 +34,7 @@ public struct RagdollStartPacket : INetSerializable
 		PlayerId = reader.GetInt();
 		ProfileId = reader.GetString();
 		DeathSequence = reader.GetUInt();
+		OwnershipEpoch = reader.GetUInt();
 		BodyPart = (EBodyPart)reader.GetByte();
 		HitDirection = reader.GetUnmanaged<Vector3>();
 		DynamicDuration = reader.GetInt();
@@ -43,6 +46,7 @@ public struct RagdollStartPacket : INetSerializable
         PlayerId = value.PlayerId,
         ProfileId = value.ProfileId,
         DeathSequence = value.DeathSequence,
+        OwnershipEpoch = value.OwnershipEpoch,
         BodyPart = value.BodyPart,
         HitDirection = value.HitDirection,
         DynamicDuration = value.DynamicDuration,
@@ -54,6 +58,7 @@ public struct RagdollStartPacket : INetSerializable
         PlayerId = value.PlayerId,
         ProfileId = value.ProfileId,
         DeathSequence = value.DeathSequence,
+        OwnershipEpoch = value.OwnershipEpoch,
         BodyPart = value.BodyPart,
         HitDirection = value.HitDirection,
         DynamicDuration = value.DynamicDuration,

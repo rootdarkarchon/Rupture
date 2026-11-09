@@ -8,6 +8,7 @@ public struct RagdollRadialImpulsePacket : INetSerializable
 	public int PlayerId;
 	public string ProfileId;
 	public uint DeathSequence;
+	public uint OwnershipEpoch;
 	public uint EventSequence;
 	public Vector3 Origin;
 	public float Radius;
@@ -18,6 +19,7 @@ public struct RagdollRadialImpulsePacket : INetSerializable
 		writer.Put(PlayerId);
 		writer.Put(ProfileId ?? string.Empty);
 		writer.Put(DeathSequence);
+		writer.Put(OwnershipEpoch);
 		writer.Put(EventSequence);
 		writer.PutUnmanaged(Origin);
 		writer.Put(Radius);
@@ -29,6 +31,7 @@ public struct RagdollRadialImpulsePacket : INetSerializable
 		PlayerId = reader.GetInt();
 		ProfileId = reader.GetString();
 		DeathSequence = reader.GetUInt();
+		OwnershipEpoch = reader.GetUInt();
 		EventSequence = reader.GetUInt();
 		Origin = reader.GetUnmanaged<Vector3>();
 		Radius = reader.GetFloat();
@@ -39,6 +42,7 @@ public struct RagdollRadialImpulsePacket : INetSerializable
         PlayerId = value.PlayerId,
         ProfileId = value.ProfileId,
         DeathSequence = value.DeathSequence,
+        OwnershipEpoch = value.OwnershipEpoch,
         EventSequence = value.EventSequence,
         Origin = value.Origin,
         Radius = value.Radius,
@@ -49,6 +53,7 @@ public struct RagdollRadialImpulsePacket : INetSerializable
         PlayerId = value.PlayerId,
         ProfileId = value.ProfileId,
         DeathSequence = value.DeathSequence,
+        OwnershipEpoch = value.OwnershipEpoch,
         EventSequence = value.EventSequence,
         Origin = value.Origin,
         Radius = value.Radius,
