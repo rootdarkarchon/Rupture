@@ -79,9 +79,6 @@ internal static class StartupAbiTests
                 awake.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldfld && i.Operand is FieldReference f && f.Name == fieldName),
                 "Harmony capacity field exists and is consumed by native Awake: " + fieldName);
         }
-        Check(awake.Body.Instructions.Any(i => i.OpCode == OpCodes.Newarr &&
-            i.Operand is TypeReference type && type.FullName == "UnityEngine.BoundingSphere"),
-            "native Awake allocates dynamic decal culling storage");
 
         var nativeMesh = nativeRenderer.NestedTypes.Single(t => t.Name == "ManagedMesh");
         var meshConstructor = nativeMesh.Methods.Single(m => m.IsConstructor && !m.IsStatic);

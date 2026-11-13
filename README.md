@@ -2,7 +2,7 @@
 
 Rupture adds procedural gore, injury effects and reactive corpse physics to **SPT 4.1**, with optional **Fika** support.
 
-Current version: **1.4.0**.
+Current version: **1.4.1**.
 
 > [!NOTE]
 > Rupture was written with OpenAI Codex under human direction, review and testing. Live-game validation remains necessary; automated checks do not establish compatibility with every setup.
@@ -36,7 +36,7 @@ Use the BepInEx configuration menu or edit `BepInEx/config/com.rootdarkarchon.ru
 - Severed stumps cause four times native heavy-bleeding health loss. Bandages, tourniquets, stims and passive healing cannot stop this condition; actual completed surgery is required. Disabling severing prevents new injuries while preserving existing ones. See the [living severing guide](docs/Living-Bot-Leg-Severing.md) for details.
 - **Automatic Headgear Detachment** is enabled by default. Disable it to keep equipment on corpses while retaining head wounds.
 - **Ragdoll Sleep Time** defaults to five seconds; bodies may settle earlier. **Localized Ragdoll Physics** enables standalone corpse simulation and preserves or restores native physics on backend failure.
-- **Maximum Ground Decals** changes the game's shared decal capacity when the next world loads.
+- **Maximum Ground Decals** changes the game's static decal capacity (all blood and static impact marks) when the next world loads.
 - **Persistent Casing Physics** retains up to **4,096 casings** by default. Lower capacity to reduce load; zero or disabling the feature releases retained casings. Casing settings and motion are local and inactive on headless.
 
 In Fika, a graphical host controls shared settings. A headless host normally adopts the requesting client's settings for that raid and distributes them to other clients. Enable **Force Headless Configuration** on headless to use its own settings instead; changes take effect next raid. These temporary overrides preserve saved preferences. Diagnostics and machine-specific settings remain local.

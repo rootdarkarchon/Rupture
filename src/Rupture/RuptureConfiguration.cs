@@ -97,7 +97,7 @@ public static class RuptureConfiguration
 			new AcceptableValueRange<float>(0.25f, 30f),
 			new ConfigurationManagerAttributes { IsAdvanced = true, Order = 3 }));
 		MaxDecals = config.Bind("Blood | Performance", "Maximum Ground Decals", 2048, new ConfigDescription(
-			"Capacity of EFT's static and dynamic environment decal pools, including blood and impact marks. Applied when the next world loads. Values below one use one decal per pool.",
+			"Capacity of EFT's static environment decal pool, which holds all blood decals and impact marks on static geometry. Impact marks on movable objects keep EFT's own pool size. Applied when the next world loads. Values below one use one decal.",
 			null,
 			new ConfigurationManagerAttributes { IsAdvanced = true, Order = 3 }));
 
@@ -123,7 +123,7 @@ public static class RuptureConfiguration
 			null,
 			new ConfigurationManagerAttributes { IsAdvanced = true, Order = 2 }));
 		ExternalEnvironmentPolicy = config.Bind("Ragdolls | Performance", "External Environment Mode", ExternalEnvironmentMode.ProximityCache, new ConfigDescription(
-			"ProximityCache extracts Unity-cooked geometry near each ragdoll. PrebakeEntireRaid blocks at raid start and commits the complete loaded environment atomically. Changes take effect on the next raid.",
+			"ProximityCache extracts Unity-cooked geometry near each ragdoll. PrebakeEntireRaid captures the complete loaded environment at raid start, builds it on the PhysX owner thread in the background, and commits it atomically; EFT native corpse physics stays active until the commit. Changes take effect on the next raid.",
 			null,
 			new ConfigurationManagerAttributes { IsAdvanced = true, Order = 1 }));
 		ExternalPhysXDispatcherThreads = config.Bind("Ragdolls | Performance", "External PhysX Dispatcher Threads", 2, new ConfigDescription(

@@ -101,7 +101,7 @@ Environment selection follows the relevant collision layers and supported nontri
 | Mode | Work and ownership |
 | --- | --- |
 | `ProximityCache` | Captures near each consumer, including a bounded velocity sweep. Shared references retain active geometry; unused static entries are disabled and retained in a 2,048-entry LRU. Moving mechanisms update kinematically. Bounded audits also detect static/topology changes. |
-| `PrebakeEntireRaid` | Waits for loaded scenes to stabilize for two frames, captures on main, builds a staged environment on owner, and atomically swaps it into use. Failure discards staging. Scene additions use the same complete capture/commit principle; proximity safety handling covers runtime additions. |
+| `PrebakeEntireRaid` | Waits for loaded scenes to stabilize for two frames, captures on main, then queues the staged environment build on owner without blocking main. The build is polled each frame under its own 120 s watchdog (not the 500 ms synchronous owner watchdog); until it commits, the backend is not ready and EFT native physics stays active. Completion atomically swaps the staged scene into use; failure discards staging. Raid reset waits for an in-flight build within the same budget. Scene additions use the same complete capture/commit principle; proximity safety handling covers runtime additions. |
 
 Both paths use the same geometry capture/cooking rules. A scale/topology replacement is prepared before replacing the old actor. Capture, cooking and whole-raid staging can block during their low-frequency owner invocations and remain subject to watchdog failure; “prebake” is not a promise of zero loading stalls.
 

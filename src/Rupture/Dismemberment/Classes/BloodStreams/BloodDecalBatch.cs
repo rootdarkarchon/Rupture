@@ -12,8 +12,10 @@ using MeshData = DeferredDecals.DeferredDecalRenderer.ManagedMesh;
 
 namespace Rupture.Dismemberment.Classes.BloodStreams;
 
-// Keep native projector generation and ring insertion intact; coalesce only the
-// upload at the end of our synchronous emission scope. Constructors still upload.
+// Keep native projector generation and ring insertion intact; replace only the
+// whole-mesh upload. Inside our synchronous emission scope uploads coalesce until
+// scope exit; outside it (vanilla impact marks) the single projector uploads at
+// once. Either way only dirty ranges reach the mesh. Constructors still upload.
 internal static class BloodDecalBatch
 {
     private static Harmony _harmony;
@@ -45,8 +47,9 @@ internal static class BloodDecalBatch
             Count += 1 - removed;
         }
     }
-    // Reuse only bounded scratch/range storage, never retain a native mesh between scopes.
+    // Reuse only bounded scratch/range storage, never retain a native mesh between calls.
     private static readonly List<Pending> PendingMeshes = new List<Pending>(4);
+    private static readonly Pending Immediate = new Pending();
     private static readonly Vertex[] Scratch = new Vertex[MaximumPartialVertices];
     private static readonly List<VertexAttributeDescriptor> Attributes = new List<VertexAttributeDescriptor>(6);
     private static int _pendingCount;
@@ -88,7 +91,15 @@ internal static class BloodDecalBatch
     }
     private static void Upload(MeshData data, int startvIndex)
     {
-        if (_depth == 0) { data.UpdateInnerMesh(); return; }
+        if (_depth == 0)
+        {
+            // Native emissions (bullet impacts on static geometry) share these meshes. Their cost
+            // must not scale with capacity, but they stay out of Rupture's blood trace counters.
+            Immediate.Data = data; Immediate.Count = 0; Immediate.Full = false; Immediate.Add(startvIndex);
+            try { Flush(Immediate, false); }
+            finally { Immediate.Data = null; }
+            return;
+        }
         ShadowRagdollWorld.RecordMainThreadWork(Work.BloodDecalDeferredUploads, 1);
         for (int i = 0; i < _pendingCount; i++)
             if (ReferenceEquals(PendingMeshes[i].Data, data)) { PendingMeshes[i].Add(startvIndex); return; }
@@ -118,7 +129,7 @@ internal static class BloodDecalBatch
         }
         return true;
     }
-    private static void Flush(Pending pending)
+    private static void Flush(Pending pending, bool trace)
     {
         MeshData data = pending.Data;
         int vertices = 0;
@@ -129,7 +140,7 @@ internal static class BloodDecalBatch
             try
             {
                 partial = Compatible(data);
-                if (!partial) ShadowRagdollWorld.RecordMainThreadWork(Work.BloodDecalLayoutFallbacks, 1);
+                if (!partial) { if (trace) ShadowRagdollWorld.RecordMainThreadWork(Work.BloodDecalLayoutFallbacks, 1); }
                 else
                 {
                     Bounds bounds = data.Mesh.bounds;
@@ -144,11 +155,9 @@ internal static class BloodDecalBatch
                             bounds.Encapsulate(data.Vertices[index]);
                         }
                         data.Mesh.SetVertexBufferData(Scratch, 0, dirty.Start, count, 0, MeshUpdateFlags.DontRecalculateBounds);
-                        ShadowRagdollWorld.RecordMainThreadWork(Work.BloodDecalUploadRanges, 1);
-                        RecordVolume(count);
+                        if (trace) { ShadowRagdollWorld.RecordMainThreadWork(Work.BloodDecalUploadRanges, 1); RecordVolume(count); }
                     }
                     data.Mesh.bounds = bounds;
-                    ShadowRagdollWorld.RecordMainThreadWork(Work.BloodDecalPartialUploads, 1);
                 }
             }
             catch (Exception exception)
@@ -161,10 +170,11 @@ internal static class BloodDecalBatch
         }
         if (!partial)
         {
-            data.UpdateInnerMesh(); RecordVolume(data.Vertices.Length);
-            ShadowRagdollWorld.RecordMainThreadWork(Work.BloodDecalFullUploads, 1);
+            data.UpdateInnerMesh();
+            if (trace) { RecordVolume(data.Vertices.Length); ShadowRagdollWorld.RecordMainThreadWork(Work.BloodDecalFullUploads, 1); }
         }
-        ShadowRagdollWorld.RecordMainThreadWork(Work.BloodDecalUploads, 1);
+        else if (trace) ShadowRagdollWorld.RecordMainThreadWork(Work.BloodDecalPartialUploads, 1);
+        if (trace) ShadowRagdollWorld.RecordMainThreadWork(Work.BloodDecalUploads, 1);
     }
     private static void RecordVolume(int vertices)
     {
@@ -180,7 +190,7 @@ internal static class BloodDecalBatch
             try
             {
                 using (ShadowRagdollWorld.TraceMainThread(ShadowRagdollWorld.MainThreadStage.BloodDecalUpload))
-                    for (int i = 0; i < _pendingCount; i++) Flush(PendingMeshes[i]);
+                    for (int i = 0; i < _pendingCount; i++) Flush(PendingMeshes[i], true);
             }
             finally { ClearPending(); }
         }
@@ -190,5 +200,5 @@ internal static class BloodDecalBatch
         for (int i = 0; i < _pendingCount; i++) PendingMeshes[i].Data = null;
         _pendingCount = 0;
     }
-    internal static void Shutdown() { _harmony?.UnpatchSelf(); _harmony = null; ClearPending(); _depth = 0; _partialFailed = false; }
+    internal static void Shutdown() { _harmony?.UnpatchSelf(); _harmony = null; ClearPending(); Immediate.Data = null; _depth = 0; _partialFailed = false; }
 }

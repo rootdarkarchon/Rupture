@@ -22,6 +22,9 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 	private const int EnvironmentShapeAuditPerFrame = 64;
 	private const int DeferredUnityShapeAuditPerFrame = 128;
 	private const int MaximumRetainedStaticEnvironment = 2048;
+	// The full-raid native build legitimately runs for seconds on the owner, so it
+	// is polled across frames instead of sharing the 500 ms synchronous watchdog.
+	private const int InitialBakeWatchdogMilliseconds = 120000;
 	private readonly object _ownerGate = new object();
 	private readonly Queue<OwnerWork> _ownerQueue = new Queue<OwnerWork>();
 	private readonly AutoResetEvent _ownerSignal = new AutoResetEvent(false);
@@ -96,6 +99,10 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 	private int _bakeFailures;
 	private double _bakeMilliseconds;
 	private long _rawGeometryBytes;
+	private OwnerWork _bakeWork;
+	private List<ActorSnapshot> _bakeSnapshots;
+	private List<NativeActor> _bakeCreated;
+	private readonly Stopwatch _bakeStopwatch = new Stopwatch();
 
 	public bool IsInitialized => _api != null && !_disposed;
 	public bool IsRaidReady => _ready && string.IsNullOrEmpty(Failure);
@@ -136,7 +143,7 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 				graphicalBodies = $"bodyShapeCommands=enabled:{enabled}/total:{total}/bodiesWithoutCollision:{empty}/kinematic:{kinematic}, ";
 				graphicalBodies += $"casingCoverage=queries:{_casingEnvironmentQueries}/hierarchyVisits:{_environmentHierarchy.Visits}/hierarchyHits:{_environmentHierarchy.Hits}/emptyCaptures:{_casingEmptyCaptures}, ";
 			}
-			return $"backend=ExternalPhysX, ready={IsRaidReady}, meshExtraction=UnityPhysXExtraction/{_meshGeometrySource?.Status ?? "uninitialized"}, initialBake={(IsFullPrebake ? (_ready ? "complete" : (_failure == null ? "waiting" : "failed")) : "not-selected")}, " +
+			return $"backend=ExternalPhysX, ready={IsRaidReady}, meshExtraction=UnityPhysXExtraction/{_meshGeometrySource?.Status ?? "uninitialized"}, initialBake={(IsFullPrebake ? (_ready ? "complete" : (_failure != null ? "failed" : (_bakeWork != null ? "building" : "waiting"))) : "not-selected")}, " +
 				$"lateBake={_lateScenes.Count}, environmentActors={_environmentActors.Count}/static:{_environmentActors.Count - movable}/movable:{movable}/retained:{_retainedStaticEnvironment.Count}, " +
 				$"environmentShapes={shapes}/disabled:{disabledShapes}/deferredUnityShapes:{_deferredUnityShapeIds.Count}, bodies={_bodies.Count}, joints={_joints.Count}, materials={scene?.MaterialCount ?? 0}, movablePoseUpdates={_movablePoseUpdates}, scaleRebuilds={_scaleRebuilds}, " +
 				$"movablePolling=4Hz/polls:{_movablePolls}/rootChecks:{_movableRootChecks}, " +
@@ -214,6 +221,11 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 		}
 		if (!_ready && _failure == null && IsFullPrebake)
 		{
+			if (_bakeWork != null)
+			{
+				PollInitialEnvironment();
+				return;
+			}
 			string signature = LoadedSceneSignature();
 			if (string.Equals(signature, _lastSceneSignature, StringComparison.Ordinal)) _stableSceneFrames++;
 			else
@@ -760,6 +772,12 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 		_queuedCasingFrame = _completedCasingFrame = null;
 		if (_api == null || _disposed) return;
 		if (_ownerThreadUnresponsive) return;
+		OwnerWork bake = _bakeWork;
+		if (bake != null && !bake.Completion.Task.Wait(Math.Max(0, InitialBakeWatchdogMilliseconds - (int)_bakeStopwatch.ElapsedMilliseconds)))
+		{
+			QuarantineInitialBake(bake);
+			return;
+		}
 		OwnerWork step;
 		lock (_ownerGate) step = _stepWork;
 		if (step != null && !step.Completion.Task.Wait(500))
@@ -818,6 +836,10 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 		_bakeFailures = 0;
 		_bakeMilliseconds = 0d;
 		_rawGeometryBytes = 0L;
+		_bakeWork = null;
+		_bakeSnapshots = null;
+		_bakeCreated = null;
+		_bakeStopwatch.Reset();
 	}
 
 	public void Dispose()
@@ -873,56 +895,107 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 
 	private void BuildInitialEnvironment()
 	{
-		Stopwatch stopwatch = Stopwatch.StartNew();
-		NativeScene staging = null;
+		_bakeStopwatch.Restart();
 		try
 		{
 			List<Collider> colliders = EnumerateLoadedColliders().ToList();
 			Log(ExternalLogLevel.Info, $"External PhysX full bake started: eligibleColliders={colliders.Count}, loadedScenes={SceneManager.sceneCount}.");
 			_meshGeometrySource.PrepareAll();
 			List<ActorSnapshot> snapshots = CaptureColliders(colliders, (completed, total) =>
-				Log(ExternalLogLevel.Info, $"External PhysX full bake capture progress: actors={completed}/{total}, elapsedMs={stopwatch.Elapsed.TotalMilliseconds:F1}."));
+				Log(ExternalLogLevel.Info, $"External PhysX full bake capture progress: actors={completed}/{total}, elapsedMs={_bakeStopwatch.Elapsed.TotalMilliseconds:F1}."));
 			List<MeshGeometry> uniqueMeshes = snapshots.SelectMany(actor => actor.Shapes).Select(shape => shape.Mesh).Where(mesh => mesh != null)
 				.GroupBy(mesh => mesh.CacheKey(_options.EftBuild ?? "unknown"), StringComparer.Ordinal).Select(group => group.First()).ToList();
 			List<HeightFieldGeometry> uniqueHeightFields = snapshots.SelectMany(actor => actor.Shapes).Select(shape => shape.HeightField).Where(heightField => heightField != null)
 				.GroupBy(heightField => heightField.CacheKey(_options.EftBuild ?? "unknown"), StringComparer.Ordinal).Select(group => group.First()).ToList();
 			_rawGeometryBytes = uniqueMeshes.Sum(mesh => (long)mesh.Vertices.Length * 12L + (long)mesh.Indices.Length * 4L) + uniqueHeightFields.Sum(heightField => (long)heightField.Samples.Length);
-			Log(ExternalLogLevel.Info, $"External PhysX full bake capture complete: colliders={snapshots.Sum(actor => actor.Shapes.Count)}, actors={snapshots.Count}, uniqueMeshes={uniqueMeshes.Count}, uniqueHeightFields={uniqueHeightFields.Count}, estimatedRawGeometryBytes={_rawGeometryBytes}, elapsedMs={stopwatch.Elapsed.TotalMilliseconds:F1}.");
-			List<NativeActor> created = null;
-			InvokeOwner(() =>
+			Log(ExternalLogLevel.Info, $"External PhysX full bake capture complete: colliders={snapshots.Sum(actor => actor.Shapes.Count)}, actors={snapshots.Count}, uniqueMeshes={uniqueMeshes.Count}, uniqueHeightFields={uniqueHeightFields.Count}, estimatedRawGeometryBytes={_rawGeometryBytes}, elapsedMs={_bakeStopwatch.Elapsed.TotalMilliseconds:F1}.");
+			if (_disposed || _ownerThreadUnresponsive) throw new InvalidOperationException("External PhysX owner is unavailable.");
+			NativeApi.UnitySceneSettings sourceSceneSettings = _meshGeometrySource.SourceSceneSettings;
+			OwnerWork work = new OwnerWork(() =>
 			{
-				staging = new NativeScene(_api, _options, _meshGeometrySource.SourceSceneSettings);
-				created = staging.CreateBatch(snapshots);
+				// Owner-only: the staged scene replaces _scene only after every actor exists.
+				NativeScene staging = new NativeScene(_api, _options, sourceSceneSettings);
+				try { _bakeCreated = staging.CreateBatch(snapshots); }
+				catch
+				{
+					staging.Dispose();
+					throw;
+				}
 				NativeScene previous = _scene;
 				_scene = staging;
-				staging = null;
 				previous?.Dispose();
-			});
+				return null;
+			}, 0, name: nameof(BuildInitialEnvironment));
+			_bakeSnapshots = snapshots;
+			_bakeWork = work;
+			lock (_ownerGate) { _activity.Changed(); _ownerQueue.Enqueue(work); }
+			_ownerSignal.Set();
+			Log(ExternalLogLevel.Info, $"External PhysX full bake native build queued; EFT native corpse physics remains active until it commits. elapsedMs={_bakeStopwatch.Elapsed.TotalMilliseconds:F1}.");
+		}
+		catch (Exception exception)
+		{
+			FailInitialEnvironment(exception);
+		}
+	}
+
+	private void PollInitialEnvironment()
+	{
+		OwnerWork work = _bakeWork;
+		if (!work.Completion.Task.IsCompleted)
+		{
+			if (_bakeStopwatch.ElapsedMilliseconds >= InitialBakeWatchdogMilliseconds) QuarantineInitialBake(work);
+			return;
+		}
+		List<ActorSnapshot> snapshots = _bakeSnapshots;
+		List<NativeActor> created = _bakeCreated;
+		_bakeWork = null;
+		_bakeSnapshots = null;
+		_bakeCreated = null;
+		try
+		{
+			if (work.Exception != null)
+				throw new InvalidOperationException($"External PhysX owner operation failed: {DescribeException(work.Exception)}", work.Exception);
 			CommitEnvironment(snapshots, created);
 			_ready = true;
 			_initialColliderCount = snapshots.Sum(actor => actor.Shapes.Count);
 			_initialActorCount = snapshots.Count;
-			_bakeMilliseconds = stopwatch.Elapsed.TotalMilliseconds;
-			Log(ExternalLogLevel.Lifecycle, $"External PhysX full bake committed atomically: colliders={_initialColliderCount}, actors={_initialActorCount}, deferredInactiveUnityShapes={_deferredUnityShapeIds.Count}, elapsedMs={_bakeMilliseconds:F1}, {Status}.");
+			_bakeMilliseconds = _bakeStopwatch.Elapsed.TotalMilliseconds;
+			_bakeStopwatch.Stop();
+			Log(ExternalLogLevel.Lifecycle, $"External PhysX full bake committed atomically: colliders={_initialColliderCount}, actors={_initialActorCount}, deferredInactiveUnityShapes={_deferredUnityShapeIds.Count}, nativeBuildMs={work.Stopwatch.Elapsed.TotalMilliseconds:F1}, elapsedMs={_bakeMilliseconds:F1}, {Status}.");
 		}
 		catch (Exception exception)
 		{
-			_bakeFailures++;
-			_failure = exception.GetType().Name + ": " + exception.Message;
-			_ready = false;
-			InvokeOwner(() =>
-			{
-				staging?.Dispose();
-				staging = null;
-				_scene?.Dispose();
-				_scene = null;
-			});
-			Log(ExternalLogLevel.Error, $"External PhysX full bake failed; the incomplete scene was discarded and Unity fallback is required for this raid. {_failure}");
+			FailInitialEnvironment(exception);
 		}
-		finally
+	}
+
+	private void FailInitialEnvironment(Exception exception)
+	{
+		_bakeStopwatch.Stop();
+		_bakeFailures++;
+		_failure = exception.GetType().Name + ": " + exception.Message;
+		_ready = false;
+		_environmentActors.Clear();
+		_movableEnvironmentActors.Clear();
+		_environmentByCollider.Clear();
+		EnqueueOwner(() =>
 		{
-			stopwatch.Stop();
-		}
+			_scene?.Dispose();
+			_scene = null;
+		});
+		Log(ExternalLogLevel.Error, $"External PhysX full bake failed; the incomplete scene was discarded and Unity fallback is required for this raid. {_failure}");
+	}
+
+	private void QuarantineInitialBake(OwnerWork work)
+	{
+		_ownerThreadUnresponsive = true;
+		_ready = false;
+		_raidStarted = false;
+		_bakeWork = null;
+		_bakeSnapshots = null;
+		_bakeCreated = null;
+		_failure = $"External PhysX full bake native build exceeded the {InitialBakeWatchdogMilliseconds} ms watchdog. The backend is quarantined until process exit. " + DescribeOwner(work);
+		Log(ExternalLogLevel.Error, _failure);
 	}
 
 	private int AddEnvironmentBatch(List<ActorSnapshot> snapshots, string source, bool countAsRuntime)

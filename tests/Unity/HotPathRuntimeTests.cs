@@ -151,47 +151,52 @@ public static class HotPathRuntimeTests
         try
         {
             data.PasteProjectorIntoMiddle(0, 1);
-            Check(data.Uploads == 2 && data.Mesh.vertices[0].x == 1, "native emissions outside the batch upload immediately");
+            Check(data.Uploads == 1 && Exact(data) && data.Mesh.vertices[0].x == 1, "native emissions outside the batch upload only their projector immediately");
             using (BloodDecalBatch.Begin())
             {
                 data.PasteProjectorIntoMiddle(0, 2); data.PasteProjectorIntoMiddle(24, 3);
                 using (BloodDecalBatch.Begin()) { second.PasteProjectorIntoMiddle(0, 4); }
                 constructed = new MeshData();
                 Check(constructed.Uploads == 1, "native mesh initialization is never deferred");
-                Check(data.Uploads == 2 && second.Uploads == 1, "nested batch defers only projector uploads");
+                Check(data.Uploads == 1 && second.Uploads == 1, "nested batch defers only projector uploads");
             }
-            Check(data.Uploads == 2 && second.Uploads == 1 && Exact(data) && Exact(second),
+            Check(data.Uploads == 1 && second.Uploads == 1 && Exact(data) && Exact(second),
                 "partial uploads retain all channels without invoking the full native setters");
             try { using (BloodDecalBatch.Begin()) { data.PasteProjectorIntoMiddle(48, 5); throw new InvalidOperationException("fixture"); } }
             catch (InvalidOperationException) { }
-            Check(data.Uploads == 2 && Exact(data) && data.Mesh.vertices[48].x == 5, "exception exit flushes pending partial data");
+            Check(data.Uploads == 1 && Exact(data) && data.Mesh.vertices[48].x == 5, "exception exit flushes pending partial data");
             data.PasteProjectorIntoMiddle(72, 6);
-            Check(data.Uploads == 3, "exception exit restores immediate uploads");
+            Check(data.Uploads == 1 && Exact(data) && data.Mesh.vertices[72].x == 6, "exception exit restores immediate partial uploads");
             using (BloodDecalBatch.Begin())
             {
                 data.PasteProjectorIntoMiddle(data.Vertices.Length - 24, 8);
                 data.PasteProjectorIntoMiddle(0, 9); data.PasteProjectorIntoMiddle(0, 10);
                 data.PasteProjectorIntoMiddle(96, 11);
             }
-            Check(data.Uploads == 3 && Exact(data) && data.Mesh.vertices[0].x == 10, "wrapped/disjoint ranges preserve untouched data and repeated-slot last-write order");
+            Check(data.Uploads == 1 && Exact(data) && data.Mesh.vertices[0].x == 10, "wrapped/disjoint ranges preserve untouched data and repeated-slot last-write order");
             data.Mesh.bounds = new Bounds(Vector3.zero, Vector3.one);
             using (BloodDecalBatch.Begin()) data.PasteProjectorIntoMiddle(120, 25000);
             Check(data.Mesh.bounds.Contains(data.Vertices[120]) && data.Mesh.bounds.Contains(Vector3.zero), "partial writes expand bounds for newly distant decals");
             using (BloodDecalBatch.Begin()) for (int i = 0; i < 40; i++) data.PasteProjectorIntoMiddle(i * 24, i + 20);
-            Check(data.Uploads == 4 && Exact(data), "large dirty coverage falls back to native full upload");
+            Check(data.Uploads == 2 && Exact(data), "large dirty coverage falls back to native full upload");
             using (BloodDecalBatch.Begin()) for (int i = 0; i < 33; i++) data.PasteProjectorIntoMiddle(i * 48, i + 30);
-            Check(data.Uploads == 5 && Exact(data), "fragmented dirty ranges stay bounded and fall back safely");
+            Check(data.Uploads == 3 && Exact(data), "fragmented dirty ranges stay bounded and fall back safely");
             data.Mesh.colors = new Color[data.Vertices.Length];
             using (BloodDecalBatch.Begin()) data.PasteProjectorIntoMiddle(0, 12);
-            Check(data.Uploads == 6 && Exact(data), "unexpected extra vertex channel triggers native layout fallback");
+            Check(data.Uploads == 4 && Exact(data), "unexpected extra vertex channel triggers native layout fallback");
+            data.PasteProjectorIntoMiddle(48, 14);
+            Check(data.Uploads == 5 && Exact(data), "immediate native emissions also fall back on unexpected layouts");
             using (BloodDecalBatch.Begin()) { data.PasteProjectorIntoMiddle(24, 13); data.Mesh.Clear(false); }
-            Check(data.Uploads == 7 && Exact(data), "externally cleared mesh is repaired with the complete native data");
+            Check(data.Uploads == 6 && Exact(data), "externally cleared mesh is repaired with the complete native data");
             for (int i = 0; i < 5; i++) using (BloodDecalBatch.Begin()) data.PasteProjectorIntoMiddle(0, i);
             long before = GC.GetAllocatedBytesForCurrentThread();
             for (int i = 0; i < 100; i++) using (BloodDecalBatch.Begin()) data.PasteProjectorIntoMiddle((i % 128) * 24, i);
-            Check(GC.GetAllocatedBytesForCurrentThread() == before && data.Uploads == 7 && Exact(data), "warmed partial mesh updates allocate no managed memory and revalidate restored layouts");
+            Check(GC.GetAllocatedBytesForCurrentThread() == before && data.Uploads == 6 && Exact(data), "warmed partial mesh updates allocate no managed memory and revalidate restored layouts");
+            before = GC.GetAllocatedBytesForCurrentThread();
+            for (int i = 0; i < 100; i++) data.PasteProjectorIntoMiddle((i % 128) * 24, i + 200);
+            Check(GC.GetAllocatedBytesForCurrentThread() == before && data.Uploads == 6 && Exact(data), "immediate native emissions upload partially without managed allocation");
             BloodDecalBatch.Shutdown(); data.PasteProjectorIntoMiddle(0, 7);
-            Check(data.Uploads == 8, "shutdown restores native upload call");
+            Check(data.Uploads == 7, "shutdown restores native upload call");
         }
         finally { BloodDecalBatch.Shutdown(); data.Dispose(); second.Dispose(); constructed?.Dispose(); }
     }

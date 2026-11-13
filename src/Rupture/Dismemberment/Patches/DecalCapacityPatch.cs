@@ -5,22 +5,23 @@ using SPT.Reflection.Patching;
 
 namespace Rupture.Dismemberment.Patches;
 
-// GameWorld creates a fresh effects prefab. Configure its serialized capacities
-// before EFT allocates meshes, dynamic decals and their culling-sphere array.
+// GameWorld creates a fresh effects prefab. Configure the static pool capacity
+// before EFT allocates its managed meshes. Rupture blood emits only through the
+// static path (EmitBloodOnEnvironment/EmitBleeding), so the dynamic impact pool
+// keeps its serialized size: its per-decal Update, culling and draw costs scale
+// linearly with capacity once the ring fills.
 internal sealed class DecalCapacityPatch : ModulePatch
 {
     protected override MethodBase GetTargetMethod() =>
         typeof(DeferredDecalRenderer).GetMethod(nameof(DeferredDecalRenderer.Awake));
 
     [PatchPrefix]
-    private static void Prefix(ref int ____maxDecals, ref int ____maxDynamicDecals)
+    private static void Prefix(ref int ____maxDecals)
     {
         if (MultiplayerRuntime.Current.IsHeadless || RuptureConfiguration.EnableBloodEffects?.Value != true)
             return;
 
-        // Both native emit paths use their capacity as a modulo divisor.
-        int capacity = Math.Max(1, RuptureConfiguration.MaxDecals.Value);
-        ____maxDecals = capacity;
-        ____maxDynamicDecals = capacity;
+        // The native emit path uses this capacity as a modulo divisor.
+        ____maxDecals = Math.Max(1, RuptureConfiguration.MaxDecals.Value);
     }
 }

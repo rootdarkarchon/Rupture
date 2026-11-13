@@ -245,7 +245,7 @@ If the authority's own lease expires during a genuine hold, the authority adopts
 | Epoch classification, retention, adoption epoch, queue end, tombstone revival | `src/Rupture/Ragdolls/Classes/RagdollCoordinator.Handoff.cs` |
 | Held guards on send/receive, start while held, `ShouldStop` passthrough | `src/Rupture/Ragdolls/Classes/RagdollCoordinator.cs` |
 | Ragdoll packets with `OwnershipEpoch` | `src/Rupture/Ragdolls/Classes/Packets/*.cs`, `src/Rupture.Fika/Ragdolls/Classes/Packets/*.cs` |
-| Protocol 16 and release 1.4.0 | `src/Rupture.Fika/Impacts/FikaImpactNetwork.cs` |
+| Protocol 16 and release 1.4.1 | `src/Rupture.Fika/Impacts/FikaImpactNetwork.cs` |
 
 ## Validation
 
