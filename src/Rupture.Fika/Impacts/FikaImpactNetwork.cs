@@ -21,7 +21,7 @@ namespace Rupture.Impacts;
 internal static class FikaImpactNetwork
 {
     internal const int Protocol = 16;
-    internal const string Version = "1.4.1";
+    internal const string Version = "1.4.2";
     private sealed class PeerState { internal NetPeer Peer; internal string Session; internal float Deadline; internal uint ConfigurationRevision; }
     internal enum Reconciliation { Applied, Stale, WaitingIdentity, WaitingDeathData, Rejected }
     private sealed class PendingState
@@ -309,7 +309,10 @@ internal static class FikaImpactNetwork
     {
         if (!RagdollCoordinator.IsNetworkAuthority || _manager == null || !Health.BotSeverStateService.Valid(data)) return;
         var packet = new BotSeverPacket { Session = _session, Data = data };
-        _manager.SendData(ref packet, unreliable ? DeliveryMethod.Unreliable : DeliveryMethod.ReliableOrdered);
+        // A falling snapshot carries up to 32 bone hierarchy paths and routinely exceeds LiteNetLib's
+        // 1023-byte unfragmented limit, so DeliveryMethod.Unreliable throws TooBigPacketException.
+        // ReliableUnordered fragments without head-of-line blocking; receivers drop stale PoseSequence values.
+        _manager.SendData(ref packet, unreliable ? DeliveryMethod.ReliableUnordered : DeliveryMethod.ReliableOrdered);
     }
     private static void ReceiveBotSever(BotSeverPacket packet)
     {
