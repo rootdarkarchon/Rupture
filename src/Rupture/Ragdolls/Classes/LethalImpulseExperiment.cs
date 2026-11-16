@@ -44,6 +44,23 @@ internal static class LethalImpulseExperiment
         internal Vector3 OriginalRupturePoint;
         internal bool ComparisonInvalidated;
         internal bool Production;
+        internal void Clear()
+        {
+            Id = 0; Player = null; Profile = null; Ragdoll = null; Collider = null; Projectile = 0; FireIndex = 0;
+            Point = Direction = default; CreatedAt = 0f; CreatedFrame = 0; Policy = null;
+            StockBody = RuptureBody = null;
+            StockImpulse = StockPoint = RuptureImpulse = OriginalRuptureImpulse = RupturePoint = default;
+            StockSeen = RuptureSeen = StockNativePending = RuptureNativePending = false;
+            StockExternalPending = RuptureExternalPending = false;
+            StockExternalInFlight = RuptureExternalInFlight = false;
+            StockNativeSteps = RuptureNativeSteps = 0;
+            StockBeforeVelocity = StockBeforeAngular = RuptureBeforeVelocity = RuptureBeforeAngular = default;
+            StockStepObserved = RuptureStepObserved = false;
+            StockCapturedPending = RuptureCapturedPending = NativeStepUncertain = false;
+            DescriptorCount = 0; ContactShot = null; ShotInstance = 0; ContactMass = ContactSpeed = 0f;
+            OriginalRuptureBody = null; OriginalRuptureCollider = null; OriginalRupturePoint = default;
+            ComparisonInvalidated = false; Production = false;
+        }
     }
     internal struct QueueState { internal bool Observed, HadPending; }
     internal struct ShotContext
@@ -60,6 +77,20 @@ internal static class LethalImpulseExperiment
     private static readonly string[] Events = new string[MaximumEvents];
     private static int _eventCount, _eventCursor, _dropped;
     private static uint _nextId;
+    private static readonly Stack<Record> RecordPool = new Stack<Record>(MaximumRecords);
+    /// <summary>
+    /// Evidence events are formatted only for the comparison experiment or with debug logging on.
+    /// Production deaths otherwise build no strings.
+    /// </summary>
+    private static bool Tracing => _enabled || RupturePlugin.Log?.IsDebugEnabled == true;
+    private static Record RentRecord() => RecordPool.Count != 0 ? RecordPool.Pop() : new Record();
+    private static void Retire(Record record)
+    {
+        // Experiment records stay unpooled: the velocity and angular traces and the comparison fixtures keep references to them.
+        if (!record.Production || RecordPool.Count >= MaximumRecords) return;
+        record.Clear();
+        RecordPool.Push(record);
+    }
     private static bool _enabled, _physical, _replaying;
     private static LethalImpulseSource _source;
     internal static bool Enabled => _enabled || RuptureConfiguration.CorrectedLethalImpulse?.Value == true || Records.Count != 0;
@@ -126,7 +157,7 @@ internal static class LethalImpulseExperiment
     internal static void Off()
     {
         if (RootVelocityExperiment.Enabled) { RootVelocityExperiment.Off(); return; }
-        foreach (Record record in Records) Release(record, "experiment-off");
+        foreach (Record record in Records) { Release(record, "experiment-off"); Retire(record); }
         Records.Clear();
         _enabled = false; _source = LethalImpulseSource.Baseline; _physical = false; Status();
     }
@@ -156,19 +187,18 @@ internal static class LethalImpulseExperiment
         // Production records retire with the existing four-second transaction
         // lifetime; only synthetic comparison fixtures retain their 32-slot cap.
         if (_enabled && Records.Count >= MaximumRecords) { _dropped++; return; }
-        Record record = new Record
-        {
-            Id = ++_nextId, Player = player, Profile = player.ProfileId,
-            Collider = damage.HitCollider, Projectile = sample.Valid && ImpactStateService.Eligible(damage) && damage.FireIndex == sample.FireIndex ? sample.Projectile : 0,
-            FireIndex = sample.FireIndex, Point = damage.HitPoint, Direction = damage.Direction,
-            CreatedAt = Time.realtimeSinceStartup,
-            CreatedFrame = Time.frameCount,
-            Production = !_enabled,
-            Policy = new LethalImpulsePolicy(_enabled ? _source : LethalImpulseSource.RuptureOnly, _enabled ? _physical : true)
-        };
+        Record record = RentRecord();
+        record.Id = ++_nextId; record.Player = player; record.Profile = player.ProfileId;
+        record.Collider = damage.HitCollider;
+        record.Projectile = sample.Valid && ImpactStateService.Eligible(damage) && damage.FireIndex == sample.FireIndex ? sample.Projectile : 0;
+        record.FireIndex = sample.FireIndex; record.Point = damage.HitPoint; record.Direction = damage.Direction;
+        record.CreatedAt = Time.realtimeSinceStartup;
+        record.CreatedFrame = Time.frameCount;
+        record.Production = !_enabled;
+        record.Policy = new LethalImpulsePolicy(_enabled ? _source : LethalImpulseSource.RuptureOnly, _enabled ? _physical : true);
         Records.Add(record);
         CaptureContact(record, damage, sample);
-        Event(record, "death", $"point={record.Point:F4}, direction={record.Direction:F4}, sampleMomentum={sample.Momentum:F4}");
+        if (Tracing) Event(record, "death", $"point={record.Point:F4}, direction={record.Direction:F4}, sampleMomentum={sample.Momentum:F4}");
     }
 
     private static void CaptureContact(Record record, EFT.Ballistics.DamageInfo damage, ImpactData sample)
@@ -180,7 +210,7 @@ internal static class LethalImpulseExperiment
             !SameHit(record, contact.Point, contact.Direction)) return;
         record.ContactShot = contact.Tracked; record.ShotInstance = contact.Instance;
         record.ContactMass = contact.Sample.MassGrams; record.ContactSpeed = contact.Sample.Speed;
-        Event(record, "lethal-contact-captured", $"instance={record.ShotInstance}, collider={record.Collider.name}, point={record.Point:F4}, direction={record.Direction:F4}, momentum={contact.Sample.Momentum:F4}");
+        if (Tracing) Event(record, "lethal-contact-captured", $"instance={record.ShotInstance}, collider={record.Collider.name}, point={record.Point:F4}, direction={record.Direction:F4}, momentum={contact.Sample.Momentum:F4}");
     }
 
     internal static void Bind(CorpseRagdoll ragdoll)
@@ -198,11 +228,27 @@ internal static class LethalImpulseExperiment
         return null;
     }
 
+    /// <summary>
+    /// True while the ragdoll's lethal shot has an original impulse held for the external admission. The hold replays into
+    /// native physics after <see cref="LethalImpulsePolicy.HoldSeconds"/>, so a build that waits for anything optional would
+    /// burn the window and lose the corrected impulse: such a build must run immediately.
+    /// </summary>
+    internal static bool IsHoldingForAdmission(CorpseRagdoll ragdoll)
+    {
+        Record record = Find(ragdoll);
+        return record != null && !record.Policy.Finished && (record.Policy.StockHeld || record.Policy.RuptureHeld);
+    }
+
+    /// <summary>
+    /// Finds the comparison record of a ragdoll's fatal shot. Production records are pooled and recycled after the
+    /// four-second transaction, and <see cref="RootVelocityExperiment.Record"/> keeps its result for as long, so only
+    /// unpooled experiment records are returned.
+    /// </summary>
     internal static Record FindVelocityDeath(CorpseRagdoll ragdoll)
     {
         if (!Enabled || ragdoll?._owner is not Corpse corpse) return null;
         foreach (Record record in Records)
-            if (record.Player != null && record.Player.gameObject == corpse.gameObject && record.Profile == corpse.PlayerProfileID &&
+            if (!record.Production && record.Player != null && record.Player.gameObject == corpse.gameObject && record.Profile == corpse.PlayerProfileID &&
                 record.Projectile != 0 && record.ContactShot != null && record.ShotInstance != 0 &&
                 record.Policy.Source == LethalImpulseSource.RuptureOnly && record.Policy.Physical && !record.Policy.Fallback &&
                 (record.Ragdoll == null || ReferenceEquals(record.Ragdoll, ragdoll)) && Time.realtimeSinceStartup - record.CreatedAt < 4f)
@@ -231,9 +277,12 @@ internal static class LethalImpulseExperiment
         if (record.Policy.Expired(Time.realtimeSinceStartup, Time.frameCount)) Release(record, "250ms-timeout-before-descriptor");
         record.DescriptorCount++;
         bool lookup = ragdoll.FindRigidbodySpawner(collider, out _);
-        Collider first = collider != null ? collider.GetComponent<Collider>() : null;
-        bool sameObjectSpawner = collider != null && collider.GetComponent<RigidbodySpawner>() != null;
-        Event(record, "eft-queue", $"matchedCollider={collider == record.Collider}, magnitude={(direction * thrust).magnitude:F4}, point={point:F4}, hasImpulse={ragdoll._hasImpulse}, pendingBefore={state.HadPending}, originalRan={originalRan}, lookupNow={lookup}, hit={(collider != null ? collider.name + "/" + collider.GetType().Name : "null")}, first={(first != null ? first.GetType().Name : "null")}, hitIsFirst={first == collider}, spawnerOnHitObject={sameObjectSpawner}, attachedBody={(collider != null && collider.attachedRigidbody != null ? collider.attachedRigidbody.name : "none")}");
+        if (Tracing)
+        {
+            Collider first = collider != null ? collider.GetComponent<Collider>() : null;
+            bool sameObjectSpawner = collider != null && collider.GetComponent<RigidbodySpawner>() != null;
+            Event(record, "eft-queue", $"matchedCollider={collider == record.Collider}, magnitude={(direction * thrust).magnitude:F4}, point={point:F4}, hasImpulse={ragdoll._hasImpulse}, pendingBefore={state.HadPending}, originalRan={originalRan}, lookupNow={lookup}, hit={(collider != null ? collider.name + "/" + collider.GetType().Name : "null")}, first={(first != null ? first.GetType().Name : "null")}, hitIsFirst={first == collider}, spawnerOnHitObject={sameObjectSpawner}, attachedBody={(collider != null && collider.attachedRigidbody != null ? collider.attachedRigidbody.name : "none")}");
+        }
         bool correlated = collider != null && collider == record.Collider && SameHit(record, point, direction) && Finite(direction * thrust);
         if (record.DescriptorCount != 1 || !correlated)
         {
@@ -249,9 +298,13 @@ internal static class LethalImpulseExperiment
         record.Policy.StockRejected = originalRan && !state.HadPending && !ragdoll._hasImpulse && !lookup && !record.StockSeen;
         if (record.Policy.StockRejected)
         {
-            Event(record, "stock-unarmed-confirmed", sameObjectSpawner && first != collider ?
-                "reason=non-primary-collider-on-spawner; EFT compares only GetComponent<Collider>()" :
-                "reason=no-exact-spawner-collider; EFT descriptor ran without arming any force");
+            if (Tracing)
+            {
+                bool sameObjectSpawner = collider != null && collider.GetComponent<RigidbodySpawner>() != null;
+                Event(record, "stock-unarmed-confirmed", sameObjectSpawner && collider.GetComponent<Collider>() != collider ?
+                    "reason=non-primary-collider-on-spawner; EFT compares only GetComponent<Collider>()" :
+                    "reason=no-exact-spawner-collider; EFT descriptor ran without arming any force");
+            }
             if (record.Policy.Source == LethalImpulseSource.StockOnly) Release(record, "stock-unarmed-no-stock-only-sample");
             else Resolve(record);
         }
@@ -278,7 +331,7 @@ internal static class LethalImpulseExperiment
         if (!record.Policy.CanHold(correlated, Allowed(record), ShadowRagdollWorld.Enabled && Physics.simulationMode == SimulationMode.Script))
         { Release(record, correlated ? "baseline-or-unavailable" : "stock-correlation-failed"); return true; }
         record.Policy.Held(true, Time.realtimeSinceStartup, Time.frameCount);
-        Event(record, "stock-held", $"magnitude={record.StockImpulse.magnitude:F4}, point={point:F4}");
+        if (Tracing) Event(record, "stock-held", $"magnitude={record.StockImpulse.magnitude:F4}, point={point:F4}");
         Resolve(record);
         return false;
     }
@@ -300,7 +353,7 @@ internal static class LethalImpulseExperiment
         {
             // Do not fall back to geometric matching after a stronger binding
             // exists: a pooled lifetime or another continuation may share it.
-            Event(contact, "completed-unmatched", $"projectile={projectile:X16}, instance={instance}, expectedInstance={contact.ShotInstance}; tracked lethal contact belongs to another completion");
+            if (Tracing) Event(contact, "completed-unmatched", $"projectile={projectile:X16}, instance={instance}, expectedInstance={contact.ShotInstance}; tracked lethal contact belongs to another completion");
             if (ReferenceEquals(contact.ContactShot, shot)) Release(contact, "tracked-shot-instance-mismatch");
             handled = false; return null;
         }
@@ -335,20 +388,20 @@ internal static class LethalImpulseExperiment
             {
                 mass = record.ContactMass; speed = record.ContactSpeed;
                 selectedImpulse = record.Direction.normalized * PhysicsMath.CalculateProjectileImpulseWithGain(mass, speed, multiplier, 4f);
-                Event(record, "completed-lethal-contact", $"instance={record.ShotInstance}, originalBody={(body != null ? body.name : "none")}, originalPoint={point:F4}, originalMagnitude={impulse.magnitude:F4}, selectedBody={selectedBody.name}, selectedPoint={selectedPoint:F4}, contactMomentum={mass * 0.001f * speed:F4}");
+                if (Tracing) Event(record, "completed-lethal-contact", $"instance={record.ShotInstance}, originalBody={(body != null ? body.name : "none")}, originalPoint={point:F4}, originalMagnitude={impulse.magnitude:F4}, selectedBody={selectedBody.name}, selectedPoint={selectedPoint:F4}, contactMomentum={mass * 0.001f * speed:F4}");
             }
         }
         // Never classify a distinct projectile, final penetration collider, later
         // corpse hit, or detached gib as the original lethal completed-shot event.
         if (projectile == 0 || projectile != record.Projectile || selectedCollider != record.Collider || !SameHit(record, selectedPoint, selectedImpulse))
-        { Event(record, "completed-unmatched", $"projectile={projectile:X16}, magnitude={impulse.magnitude:F4}, point={point:F4}, {BodyMotion(body)}; unchanged"); return null; }
+        { if (Tracing) Event(record, "completed-unmatched", $"projectile={projectile:X16}, magnitude={impulse.magnitude:F4}, point={point:F4}, {BodyMotion(body)}; unchanged"); return null; }
         if (record.RuptureSeen)
         { Release(record, "repeated-completed-call"); Event(record, "completed-unmatched", "repeated call left unchanged"); return null; }
         record.RuptureSeen = true; record.RuptureBody = selectedBody; record.RuptureImpulse = selectedImpulse; record.RupturePoint = selectedPoint;
         record.OriginalRuptureBody = body; record.OriginalRuptureCollider = collider;
         record.OriginalRuptureImpulse = impulse; record.OriginalRupturePoint = point;
         if (record.Policy.Expired(Time.realtimeSinceStartup, Time.frameCount)) Release(record, "250ms-timeout-before-completion");
-        Event(record, "completed", $"magnitude={impulse.magnitude:F4}, point={point:F4}, {BodyMotion(body)}");
+        if (Tracing) Event(record, "completed", $"magnitude={impulse.magnitude:F4}, point={point:F4}, {BodyMotion(body)}");
         bool correlated = selectedBody != null && Finite(selectedImpulse) && selectedImpulse.sqrMagnitude > 0f;
         if (!record.Policy.CanHold(correlated, Allowed(record), ShadowRagdollWorld.Enabled && Physics.simulationMode == SimulationMode.Script))
         { Release(record, "completed-baseline-or-unavailable"); return record; }
@@ -360,7 +413,7 @@ internal static class LethalImpulseExperiment
         }
         record.Policy.Held(false, Time.realtimeSinceStartup, Time.frameCount);
         handled = true;
-        Event(record, "rupture-held", $"selectedMagnitude={record.RuptureImpulse.magnitude:F4}, legacyMagnitude={impulse.magnitude:F4}");
+        if (Tracing) Event(record, "rupture-held", $"selectedMagnitude={record.RuptureImpulse.magnitude:F4}, legacyMagnitude={impulse.magnitude:F4}");
         Resolve(record);
         return record;
     }
@@ -383,7 +436,7 @@ internal static class LethalImpulseExperiment
         bool native = !external && body != null && !body.isKinematic;
         if (stock) { record.StockNativePending |= native; record.StockExternalPending |= external; }
         else { record.RuptureNativePending |= native; record.RuptureExternalPending |= external; }
-        Event(record, stock ? "stock-submit" : "rupture-submit", $"route={(external ? "external-queued" : native ? "native-queued" : "inactive")}, magnitude={(stock ? record.StockImpulse : record.RuptureImpulse).magnitude:F4}, point={(stock ? record.StockPoint : record.RupturePoint):F4}, {BodyMotion(body)}");
+        if (Tracing) Event(record, stock ? "stock-submit" : "rupture-submit", $"route={(external ? "external-queued" : native ? "native-queued" : "inactive")}, magnitude={(stock ? record.StockImpulse : record.RuptureImpulse).magnitude:F4}, point={(stock ? record.StockPoint : record.RupturePoint):F4}, {BodyMotion(body)}");
         if (!external && !native) Lost(record, stock ? "stock submission target inactive" : "completed-shot submission target inactive");
     }
 
@@ -396,7 +449,7 @@ internal static class LethalImpulseExperiment
         // build is not evidence of a missing callback or an unarmed stock force.
         if (committed) Resolve(record);
         if (record.Policy.Expired(Time.realtimeSinceStartup, Time.frameCount)) Release(record, "250ms-timeout-at-admission");
-        Event(record, committed ? "admission-committed" : "admission-failed", $"stockNativeSteps={record.StockNativeSteps}, ruptureNativeSteps={record.RuptureNativeSteps}, stockNativePending={record.StockNativePending}, ruptureNativePending={record.RuptureNativePending}; pending forces are NOT copied by velocity capture");
+        if (Tracing) Event(record, committed ? "admission-committed" : "admission-failed", $"stockNativeSteps={record.StockNativeSteps}, ruptureNativeSteps={record.RuptureNativeSteps}, stockNativePending={record.StockNativePending}, ruptureNativePending={record.RuptureNativePending}; pending forces are NOT copied by velocity capture");
         if (!committed) Release(record, "admission-failed");
         else
         {
@@ -418,7 +471,7 @@ internal static class LethalImpulseExperiment
         if (record == null || body == null || body != record.StockBody && body != record.RuptureBody) return;
         if (body == record.StockBody) record.StockCapturedPending = record.StockNativePending && !body.isKinematic;
         if (body == record.RuptureBody) record.RuptureCapturedPending = record.RuptureNativePending && !body.isKinematic;
-        Event(record, "admission-capture", $"body={body.name}, velocity={velocity:F4}, angular={angular:F4}, stockSteps={record.StockNativeSteps}, ruptureSteps={record.RuptureNativeSteps}; copies body velocity, not queued force accumulators");
+        if (Tracing) Event(record, "admission-capture", $"body={body.name}, velocity={velocity:F4}, angular={angular:F4}, stockSteps={record.StockNativeSteps}, ruptureSteps={record.RuptureNativeSteps}; copies body velocity, not queued force accumulators");
     }
 
     private static void MigratePending(Record record, bool stock)
@@ -431,7 +484,7 @@ internal static class LethalImpulseExperiment
         { Lost(record, "pending native source could not migrate to admitted actor"); return; }
         if (stock) { record.StockCapturedPending = record.StockNativePending = false; record.StockExternalPending = true; }
         else { record.RuptureCapturedPending = record.RuptureNativePending = false; record.RuptureExternalPending = true; }
-        Event(record, "fallback-pending-migrated", $"source={(stock ? "stock" : "rupture")}, magnitude={impulse.magnitude:F4}; no native step consumed this source");
+        if (Tracing) Event(record, "fallback-pending-migrated", $"source={(stock ? "stock" : "rupture")}, magnitude={impulse.magnitude:F4}; no native step consumed this source");
     }
 
     private static void Resolve(Record record)
@@ -454,7 +507,7 @@ internal static class LethalImpulseExperiment
         record.Policy.Finish(false);
         record.StockExternalPending = record.Policy.Source == LethalImpulseSource.StockOnly;
         record.RuptureExternalPending = record.Policy.Source == LethalImpulseSource.RuptureOnly;
-        Event(record, "single-source-queued", $"source={record.Policy.Source}, magnitude={impulse.magnitude:F4}, point={point:F4}, gain={(record.Policy.Physical ? 1 : 4)}x, stock={(record.Policy.StockRejected ? "confirmed-unarmed" : "held")}");
+        if (Tracing) Event(record, "single-source-queued", $"source={record.Policy.Source}, magnitude={impulse.magnitude:F4}, point={point:F4}, gain={(record.Policy.Physical ? 1 : 4)}x, stock={(record.Policy.StockRejected ? "confirmed-unarmed" : "held")}");
     }
 
     private static void Release(Record record, string reason)
@@ -463,7 +516,7 @@ internal static class LethalImpulseExperiment
         record.Policy.Finish(true); // latch BEFORE replay; late events remain baseline
         bool stock = record.Policy.StockHeld, rupture = record.Policy.RuptureHeld;
         record.Policy.StockHeld = record.Policy.RuptureHeld = false;
-        Event(record, "fallback", $"reason={reason}, replayStock={stock}, replayRupture={rupture}");
+        if (Tracing) Event(record, "fallback", $"reason={reason}, replayStock={stock}, replayRupture={rupture}");
         if (stock)
         {
             if (record.StockBody != null)
@@ -513,6 +566,7 @@ internal static class LethalImpulseExperiment
             if ((now - record.CreatedAt < Lifetime || record.Production && Time.frameCount <= record.CreatedFrame + 1) && record.Player != null) continue;
             Release(record, "record-expired-or-owner-destroyed");
             Records.RemoveAt(i);
+            Retire(record);
         }
     }
 
@@ -537,15 +591,21 @@ internal static class LethalImpulseExperiment
             if (record.StockStepObserved)
             {
                 record.StockNativePending = false;
-                if (record.StockBody != null) { record.StockNativeSteps++;
-                    Event(record, "native-stock-step-consumed", $"beforeV={record.StockBeforeVelocity:F4}, beforeW={record.StockBeforeAngular:F4}, {BodyMotion(record.StockBody)}; net change includes contacts/gravity/joints"); }
+                if (record.StockBody != null)
+                {
+                    record.StockNativeSteps++;
+                    if (Tracing) Event(record, "native-stock-step-consumed", $"beforeV={record.StockBeforeVelocity:F4}, beforeW={record.StockBeforeAngular:F4}, {BodyMotion(record.StockBody)}; net change includes contacts/gravity/joints");
+                }
                 else { record.NativeStepUncertain = true; Event(record, "native-stock-target-retired", "target destroyed during simulation; integration unconfirmed"); }
             }
             if (record.RuptureStepObserved)
             {
                 record.RuptureNativePending = false;
-                if (record.RuptureBody != null) { record.RuptureNativeSteps++;
-                    Event(record, "native-rupture-step-consumed", $"beforeV={record.RuptureBeforeVelocity:F4}, beforeW={record.RuptureBeforeAngular:F4}, {BodyMotion(record.RuptureBody)}; net change includes contacts/gravity/joints"); }
+                if (record.RuptureBody != null)
+                {
+                    record.RuptureNativeSteps++;
+                    if (Tracing) Event(record, "native-rupture-step-consumed", $"beforeV={record.RuptureBeforeVelocity:F4}, beforeW={record.RuptureBeforeAngular:F4}, {BodyMotion(record.RuptureBody)}; net change includes contacts/gravity/joints");
+                }
                 else { record.NativeStepUncertain = true; Event(record, "native-rupture-target-retired", "target destroyed during simulation; integration unconfirmed"); }
             }
             record.StockStepObserved = record.RuptureStepObserved = false;
@@ -567,9 +627,12 @@ internal static class LethalImpulseExperiment
         foreach (Record record in Records)
         {
             if (!record.StockExternalInFlight && !record.RuptureExternalInFlight) continue;
-            bool stockAvailable = ShadowRagdollWorld.TryReadLethalExperimentMotion(record.StockBody, out Vector3 stockV, out Vector3 stockW);
-            bool ruptureAvailable = ShadowRagdollWorld.TryReadLethalExperimentMotion(record.RuptureBody, out Vector3 rptV, out Vector3 rptW);
-            Event(record, "external-step-completed", $"stockSubmitted={record.StockExternalInFlight}, ruptureSubmitted={record.RuptureExternalInFlight}, stockMotionAvailable={stockAvailable}, ruptureMotionAvailable={ruptureAvailable}, stockV={stockV:F4}, stockW={stockW:F4}, ruptureV={rptV:F4}, ruptureW={rptW:F4}; net result includes other forces and constraints");
+            if (Tracing)
+            {
+                bool stockAvailable = ShadowRagdollWorld.TryReadLethalExperimentMotion(record.StockBody, out Vector3 stockV, out Vector3 stockW);
+                bool ruptureAvailable = ShadowRagdollWorld.TryReadLethalExperimentMotion(record.RuptureBody, out Vector3 rptV, out Vector3 rptW);
+                Event(record, "external-step-completed", $"stockSubmitted={record.StockExternalInFlight}, ruptureSubmitted={record.RuptureExternalInFlight}, stockMotionAvailable={stockAvailable}, ruptureMotionAvailable={ruptureAvailable}, stockV={stockV:F4}, stockW={stockW:F4}, ruptureV={rptV:F4}, ruptureW={rptW:F4}; net result includes other forces and constraints");
+            }
             record.StockExternalInFlight = record.RuptureExternalInFlight = false;
         }
     }
@@ -580,7 +643,7 @@ internal static class LethalImpulseExperiment
     internal static void Reset()
     {
         RootVelocityExperiment.Reset();
-        foreach (Record record in Records) Release(record, "raid-reset");
+        foreach (Record record in Records) { Release(record, "raid-reset"); Retire(record); }
         _enabled = _physical = false; _source = LethalImpulseSource.Baseline;
         _shotContext = default;
         Records.Clear(); Array.Clear(Events, 0, Events.Length);
@@ -589,6 +652,7 @@ internal static class LethalImpulseExperiment
     private static void Event(Record record, string stage, string detail)
     {
         if (stage == "comparison-invalidated") record.ComparisonInvalidated = true;
+        if (!Tracing) return;
         string text = $"RPT lethal id={record.Id}, profile={record.Profile}, projectile={record.Projectile:X16}, fire={record.FireIndex}, frame={Time.frameCount}, t={Time.realtimeSinceStartup:F5}, ageMs={(Time.realtimeSinceStartup - record.CreatedAt) * 1000f:F2}, admitted={record.Policy.Admitted}, stage={stage}: {detail}";
         Events[_eventCursor] = text.Length <= 1200 ? text : text.Substring(0, 1200);
         _eventCursor = (_eventCursor + 1) % MaximumEvents; _eventCount = Math.Min(MaximumEvents, _eventCount + 1);

@@ -63,6 +63,10 @@ public sealed class ExternalBackendOptions
 	public int EnvironmentMask { get; set; }
 	// Core owns EFT scheduling; the backend releases this lease before destroying its probe.
 	public Func<Rigidbody, IDisposable> ScheduleBootstrapProbe { get; set; }
+	/// <summary>Lets the backend skip formatting per-kill Info messages while debug logging is off.</summary>
+	public Func<bool> InfoLoggingEnabled { get; set; }
+	/// <summary>Whether the current frame has room for deferrable backend work such as the terrain capture; null means every frame does.</summary>
+	public Func<bool> DeferrableFrame { get; set; }
 	public Action<ExternalLogLevel, string> Log { get; set; }
 }
 

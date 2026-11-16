@@ -16,16 +16,35 @@ namespace Rupture.Ragdolls.Classes
             { Center = rotation * bounds.center; Size = bounds.size; Rotation = rotation; }
         }
 
+        /// <summary>Main thread only: fitting runs once per weapon body and reuses these lists instead of allocating two per fit.</summary>
+        private static readonly List<Collider> IncludedScratch = new List<Collider>(32);
+        private static readonly List<Quaternion> RotationScratch = new List<Quaternion>(8);
+
         internal static bool TryFitOriented(Rigidbody body, IReadOnlyList<Collider> colliders, out OrientedFit fit,
             IReadOnlyList<Transform> excludedRoots = null, int excludedLayer = -1)
         {
+            try { return FitOriented(body, colliders, out fit, excludedRoots, excludedLayer); }
+            finally
+            {
+                IncludedScratch.Clear();
+                RotationScratch.Clear();
+            }
+        }
+
+        private static bool FitOriented(Rigidbody body, IReadOnlyList<Collider> colliders, out OrientedFit fit,
+            IReadOnlyList<Transform> excludedRoots, int excludedLayer)
+        {
             fit = default;
             if (body == null || colliders == null) return false;
-            var included = new List<Collider>();
-            var rotations = new List<Quaternion> { Quaternion.identity };
+            List<Collider> included = IncludedScratch;
+            List<Quaternion> rotations = RotationScratch;
+            included.Clear();
+            rotations.Clear();
+            rotations.Add(Quaternion.identity);
             Quaternion inverseBody = Quaternion.Inverse(body.rotation);
-            foreach (Collider collider in colliders)
+            for (int colliderIndex = 0; colliderIndex < colliders.Count; colliderIndex++)
             {
+                Collider collider = colliders[colliderIndex];
                 if (collider == null || collider.isTrigger || collider.GetComponentInParent<Rigidbody>(true) != body ||
                     collider.gameObject.layer == excludedLayer || IsExcluded(collider.transform, excludedRoots)) continue;
                 included.Add(collider);
@@ -108,9 +127,12 @@ namespace Rupture.Ragdolls.Classes
 
         internal static bool IsExcluded(Transform transform, IReadOnlyList<Transform> roots)
         {
-            if (roots != null)
-                foreach (Transform root in roots)
-                    if (root != null && transform.IsChildOf(root)) return true;
+            if (roots == null) return false;
+            for (int index = 0; index < roots.Count; index++)
+            {
+                Transform root = roots[index];
+                if (root != null && transform.IsChildOf(root)) return true;
+            }
             return false;
         }
 

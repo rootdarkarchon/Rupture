@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -15,15 +16,27 @@ internal sealed class ExternalBody : IExternalPhysicsBody, IExternalColliderDebu
 	private Quaternion _rotation;
 	private bool _kinematic, _sleeping, _valid = true;
 	private bool _collisionEnabled = true;
-	private readonly Vector3 _centerOfMass;
-	private readonly Vector3 _physicalCenterOfMass;
+	private Vector3 _centerOfMass;
+	private Vector3 _physicalCenterOfMass;
+	private ulong _handle;
+	private bool _bound;
 	internal readonly Dictionary<int, ulong> ShapeHandlesByCollider = new Dictionary<int, ulong>();
 	internal readonly Dictionary<ulong, bool> ShapeEnabledByHandle = new Dictionary<ulong, bool>();
 
 	internal ExternalBody(ExternalPhysXRuntime runtime, ulong handle, Vector3 centerOfMass, NativeApi.BodyDesc initial, Vector3? physicalCenterOfMass = null)
+		: this(runtime, initial, centerOfMass, physicalCenterOfMass)
+	{
+		_handle = handle;
+		_bound = true;
+	}
+
+	/// <summary>
+	/// A body whose actor is created later by a creation batch. Until <see cref="Bind"/> runs on the owner, every call that
+	/// needs the native handle throws; the center-of-mass values are provisional and replaced by <see cref="Bind"/>.
+	/// </summary>
+	internal ExternalBody(ExternalPhysXRuntime runtime, NativeApi.BodyDesc initial, Vector3 centerOfMass, Vector3? physicalCenterOfMass = null)
 	{
 		_runtime = runtime;
-		Handle = handle;
 		_centerOfMass = centerOfMass;
 		_physicalCenterOfMass = physicalCenterOfMass ?? centerOfMass;
 		_position = initial.Pose.Position.ToUnity();
@@ -33,7 +46,28 @@ internal sealed class ExternalBody : IExternalPhysicsBody, IExternalColliderDebu
 		_kinematic = initial.Kind == 2;
 	}
 
-	public ulong Handle { get; }
+	public ulong Handle => _bound ? _handle : throw NotBound();
+	/// <summary>The handle without the bound check; only the scene owner and code ordered after its creation may read it.</summary>
+	internal ulong NativeHandle => _handle;
+	internal bool IsBound => _bound;
+
+	/// <summary>Owner thread: publishes the created actor. Main reads it only after observing the owner transaction complete.</summary>
+	internal void Bind(ulong handle, Vector3 centerOfMass, Vector3 physicalCenterOfMass)
+	{
+		_handle = handle;
+		_centerOfMass = centerOfMass;
+		_physicalCenterOfMass = physicalCenterOfMass;
+		_bound = true;
+	}
+
+	internal void RequireNativeHandle()
+	{
+		if (!_bound) throw NotBound();
+	}
+
+	private static InvalidOperationException NotBound() =>
+		new InvalidOperationException("The external body has no native handle until its creation batch is disposed.");
+
 	public Vector3 Position { get => _position; set { _position = value; _runtime.QueueBodyState(this, false); } }
 	public Quaternion Rotation { get => _rotation; set { _rotation = value; _runtime.QueueBodyState(this, false); } }
 	public Vector3 Velocity { get => _velocity; set { _velocity = value; _runtime.QueueBodyState(this, true); } }
@@ -82,8 +116,14 @@ internal sealed class ExternalBody : IExternalPhysicsBody, IExternalColliderDebu
 internal sealed class ExternalJoint : IExternalPhysicsJoint
 {
 	private int _broken;
-	internal ExternalJoint(ulong handle) { Handle = handle; }
-	public ulong Handle { get; }
+	private ulong _handle;
+	private bool _bound;
+	internal ExternalJoint(ulong handle) { _handle = handle; _bound = true; }
+	/// <summary>A joint created later by a creation batch; <see cref="Bind"/> publishes its handle from the owner.</summary>
+	internal ExternalJoint() { }
+	public ulong Handle => _bound ? _handle : throw new InvalidOperationException("The external joint has no native handle until its creation batch is disposed.");
+	internal ulong NativeHandle => _handle;
+	internal void Bind(ulong handle) { _handle = handle; _bound = true; }
 	public bool IsValid { get; private set; } = true;
 	public bool IsBroken => Volatile.Read(ref _broken) != 0;
 	internal void PublishBroken(bool broken) { if (broken) Volatile.Write(ref _broken, 1); }

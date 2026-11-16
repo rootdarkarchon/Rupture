@@ -4,16 +4,15 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
-using System.Runtime.CompilerServices;
 using System.Threading;
-using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using Rupture.Ragdolls.External;
 
 namespace Rupture.PhysXBackend;
 
-public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExternalCorpseControlRuntime, IExternalAngularDriveRuntime
+public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExternalCorpseControlRuntime, IExternalAngularDriveRuntime, IExternalBuildDiagnosticsRuntime,
+	IExternalEnvironmentPrefetchRuntime, IExternalCreationBatchRuntime
 {
 	private const float EnvironmentRadius = 2f;
 	private const int InitialOverlapCapacity = 256;
@@ -40,6 +39,8 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 	private readonly List<EnvironmentActor> _movableEnvironmentActors = new List<EnvironmentActor>();
 	private EnvironmentPollCadence _movablePollCadence;
 	private long _movablePolls, _movableRootChecks;
+	private bool _movablePolledThisFrame, _worstMovablePolled;
+	private int _worstJobs, _worstActors, _worstMovable, _worstPromotions, _worstLateScenes;
 	private readonly Dictionary<uint, HashSet<EnvironmentActor>> _proximityActorsByConsumer = new Dictionary<uint, HashSet<EnvironmentActor>>();
 	private readonly LinkedList<EnvironmentActor> _retainedStaticEnvironment = new LinkedList<EnvironmentActor>();
 	private readonly Queue<Scene> _lateScenes = new Queue<Scene>();
@@ -58,7 +59,7 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 	private NativeScene _scene;
 	private IMeshGeometrySource _meshGeometrySource;
 	private ExternalBackendOptions _options;
-	private OwnerWork _stepWork;
+	private StepWork _stepWork;
 	private volatile OwnerWork _executingWork;
     private ExternalCasingFrame _queuedCasingFrame, _completedCasingFrame;
     public void QueueCasingFrame(ExternalCasingFrame frame)
@@ -103,6 +104,8 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 	private List<ActorSnapshot> _bakeSnapshots;
 	private List<NativeActor> _bakeCreated;
 	private readonly Stopwatch _bakeStopwatch = new Stopwatch();
+	private bool _bodyPathWarmupQueued;
+	private long _noShapeOmissions;
 
 	public bool IsInitialized => _api != null && !_disposed;
 	public bool IsRaidReady => _ready && string.IsNullOrEmpty(Failure);
@@ -147,10 +150,22 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 				$"lateBake={_lateScenes.Count}, environmentActors={_environmentActors.Count}/static:{_environmentActors.Count - movable}/movable:{movable}/retained:{_retainedStaticEnvironment.Count}, " +
 				$"environmentShapes={shapes}/disabled:{disabledShapes}/deferredUnityShapes:{_deferredUnityShapeIds.Count}, bodies={_bodies.Count}, joints={_joints.Count}, materials={scene?.MaterialCount ?? 0}, movablePoseUpdates={_movablePoseUpdates}, scaleRebuilds={_scaleRebuilds}, " +
 				$"movablePolling=4Hz/polls:{_movablePolls}/rootChecks:{_movableRootChecks}, " +
-				graphicalBodies + $"lateSceneAdditions={_lateSceneAdditions}, runtimeSpawnAdditions={_runtimeSpawnAdditions}, " +
+				graphicalBodies + DescribePipeline() + $"lateSceneAdditions={_lateSceneAdditions}, runtimeSpawnAdditions={_runtimeSpawnAdditions}, " +
 				$"cache=memory:{scene?.MeshMemoryHits ?? 0}/disk:{scene?.MeshDiskHits ?? 0}/cooked:{scene?.MeshCooks ?? 0}/rawBytes:{_rawGeometryBytes}/cookedBytes:{scene?.CookedBytes ?? 0}, " +
 				$"initialColliders={_initialColliderCount}, initialActors={_initialActorCount}, bakeMs={_bakeMilliseconds:F1}, bakeFailures={_bakeFailures}, failure={Failure ?? "none"}";
 		}
+	}
+
+	/// <summary>
+	/// Cumulative per-raid counters of the geometry work a corpse build can trigger. Source counters are main-thread
+	/// state; the cook and cache counters are written by the owner thread and read here as aligned 64-bit values.
+	/// </summary>
+	public ExternalBuildCounters ReadBuildCounters()
+	{
+		IMeshGeometrySource source = _meshGeometrySource;
+		NativeScene scene = _scene;
+		return new ExternalBuildCounters(source?.ShapeMapRefreshes ?? 0L, source?.TargetedShapeMappings ?? 0L, source?.MeshExtractions ?? 0L,
+			scene?.MeshCooks ?? 0L, scene?.MeshDiskHits ?? 0L, scene?.MeshMemoryHits ?? 0L, _noShapeOmissions);
 	}
 
 	public void Initialize(ExternalBackendOptions options)
@@ -161,13 +176,13 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 		_options = options;
 		Directory.CreateDirectory(options.CacheRoot);
 		_api = new NativeApi(options.BackendRoot, options.GraphicalCasings);
-		_meshGeometrySource = new UnityPhysXMeshGeometrySource(_api, options.EnvironmentMask, options.Log,
-			options.ScheduleBootstrapProbe, options.EnvironmentMode == ExternalEnvironmentMode.PrebakeEntireRaid);
+		_meshGeometrySource = new UnityPhysXMeshGeometrySource(_api, options.EnvironmentMask, options.Log, options.ScheduleBootstrapProbe);
 		_ownerThread = new Thread(OwnerLoop)
 		{
 			IsBackground = true,
 			Name = "RPT External PhysX Scene Owner",
-			Priority = System.Threading.ThreadPriority.BelowNormal
+			// The main thread blocks on owner work (body/joint creation, step completion); BelowNormal let the game's own threads preempt it under load and stretch those waits.
+			Priority = System.Threading.ThreadPriority.AboveNormal
 		};
 		_ownerThread.Start();
 		Log(ExternalLogLevel.Info, $"External PhysX backend loaded from {options.BackendRoot}; PhysX=4.1.2, dispatcherThreads={options.DispatcherThreads}, environment={options.EnvironmentMode}, meshExtraction=UnityPhysXExtraction.");
@@ -198,13 +213,40 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 	{
 		if (!_raidStarted || !scene.IsValid() || !scene.isLoaded) return;
 		int handle = scene.handle;
-		if (_lateSceneHandles.Add(handle)) _lateScenes.Enqueue(scene);
+		if (_lateSceneHandles.Add(handle))
+		{
+			_lateScenes.Enqueue(scene);
+			_terrainRescan = true;
+		}
 	}
 
 	public void CaptureEnvironmentChanges()
 	{
 		if (!_raidStarted || _disposed) return;
+		long started = Stopwatch.GetTimestamp();
+		long syncStarted = _meshGeometrySource.SyncTransformsTotalTicks;
+		_environmentTimings.BeginFrame();
+		_snapshotRebuildTicks = 0L;
+		_snapshotRebuilt = false;
+		_movablePolledThisFrame = false;
+		try { CaptureEnvironmentChangesCore(); }
+		finally
+		{
+			_environmentTimings.Add(EnvironmentStep.JobsSync, _meshGeometrySource.SyncTransformsTotalTicks - syncStarted);
+			if (_environmentTimings.EndFrame(Stopwatch.GetTimestamp() - started)) RememberWorstFrameContext();
+		}
+	}
+
+	/// <summary>
+	/// One environment update, step by step; every step is timed into <see cref="_environmentTimings"/> so a long update can be
+	/// attributed to one of them. Terrain capture starts before late scenes (their jobs must not reach an unclaimed terrain first)
+	/// and takes the hold of committed terrains again right after the jobs ran, before the shape audit can see them unreferenced.
+	/// </summary>
+	private void CaptureEnvironmentChangesCore()
+	{
+		long mark = Stopwatch.GetTimestamp();
 		_meshGeometrySource.Update();
+		mark = _environmentTimings.Lap(EnvironmentStep.Source, mark);
 		if (!string.IsNullOrEmpty(_meshGeometrySource.Failure))
 		{
 			_failure = $"{_meshGeometrySource.Name} failed: {_meshGeometrySource.Failure}";
@@ -217,13 +259,16 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 			NativeApi.UnitySceneSettings sourceSceneSettings = _meshGeometrySource.SourceSceneSettings;
 			InvokeOwner(() => _scene = new NativeScene(_api, _options, sourceSceneSettings));
 			_ready = true;
+			QueueBodyPathWarmup();
 			Log(ExternalLogLevel.Lifecycle, $"External PhysX ProximityCache raid scene is ready with source parity ({sourceSceneSettings}) after {_meshGeometrySource.Name} initialization ({_meshGeometrySource.Status}).");
+			mark = _environmentTimings.Lap(EnvironmentStep.Startup, mark);
 		}
 		if (!_ready && _failure == null && IsFullPrebake)
 		{
 			if (_bakeWork != null)
 			{
 				PollInitialEnvironment();
+				_environmentTimings.Lap(EnvironmentStep.Startup, mark);
 				return;
 			}
 			string signature = LoadedSceneSignature();
@@ -234,30 +279,49 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 				_stableSceneFrames = 0;
 			}
 			if (Time.frameCount > _raidStartedFrame && _stableSceneFrames >= 2) BuildInitialEnvironment();
+			_environmentTimings.Lap(EnvironmentStep.Startup, mark);
 			return;
 		}
 		if (!_ready) return;
 
-		while (_lateScenes.Count != 0)
+		UpdateTerrainCapture();
+		mark = _environmentTimings.Lap(EnvironmentStep.Terrain, mark);
+		while (_lateScenes.Count != 0 && !TerrainCaptureBlocksScenes())
 		{
 			Scene scene = _lateScenes.Dequeue();
 			_lateSceneHandles.Remove(scene.handle);
-			if (scene.IsValid() && scene.isLoaded)
-			{
-				AddEnvironmentBatch(CaptureScene(scene), "late-scene", countAsRuntime: false);
-				if (!string.IsNullOrEmpty(_lastBatchFailure))
-				{
-					FailEnvironmentUpdate("late-scene", _lastBatchFailure);
-					return;
-				}
-			}
+			if (scene.IsValid() && scene.isLoaded) StartSceneCapture(scene);
 		}
+		mark = _environmentTimings.Lap(EnvironmentStep.Scenes, mark);
 
 		AuditDeferredUnityShapes();
+		_environmentTimings.Lap(EnvironmentStep.Deferred, mark);
+		RunMaintenanceCapture();
+		if (!_ready) return;
+		mark = Stopwatch.GetTimestamp();
+		HoldCapturedTerrains();
+		mark = _environmentTimings.Lap(EnvironmentStep.Terrain, mark);
 		AuditStaticActors();
+		mark = _environmentTimings.Lap(EnvironmentStep.StaticAudit, mark);
 		CaptureMovableChanges();
+		mark = _environmentTimings.Lap(EnvironmentStep.Movable, mark);
 		AuditEnvironmentShapes();
+		_environmentTimings.Lap(EnvironmentStep.ShapeAudit, mark);
 	}
+
+	/// <summary>What the longest environment update so far was holding, to read next to its step breakdown.</summary>
+	private void RememberWorstFrameContext()
+	{
+		_worstJobs = _jobs.Count;
+		_worstActors = _environmentActors.Count;
+		_worstMovable = _movableEnvironmentActors.Count;
+		_worstPromotions = _promotions.Count;
+		_worstLateScenes = _lateScenes.Count;
+		_worstMovablePolled = _movablePolledThisFrame;
+	}
+
+	private string DescribeWorstFrameContext() =>
+		$"envWorstFrameContext=jobs:{_worstJobs}/actors:{_worstActors}/movable:{_worstMovable}/promotions:{_worstPromotions}/lateScenes:{_worstLateScenes}/movablePoll:{_worstMovablePolled}, ";
 
 	private bool _stageCasingEnvironment;
 	public bool EnsureCasingEnvironment(uint consumerId, Vector3 center, Vector3 sweepEnd, out string failure)
@@ -281,68 +345,89 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 			failure = Failure ?? "the external environment is not ready";
 			return false;
 		}
-		if (IsFullPrebake)
-		{
-			try
-			{
-				int count = QueryEnvironment(center, sweepEnd);
-				_proximityUnknownScratch.Clear();
-				int reused = 0;
-				for (int index = 0; index < count; index++)
-				{
-					Collider collider = _overlapBuffer[index];
-					if (!Eligible(collider, includeDisabled: false)) continue;
-					int colliderId = collider.GetInstanceID();
-					if (_environmentByCollider.ContainsKey(colliderId)) reused++;
-					else if (!_bodyShapesByCollider.ContainsKey(colliderId)) _proximityUnknownScratch.Add(collider);
-				}
-				_meshGeometrySource.PrepareProximity(center, sweepEnd, EnvironmentRadius, _proximityUnknownScratch);
-				int created = CaptureProximityUnknown("runtime-proximity", true);
-				if (!string.IsNullOrEmpty(_lastBatchFailure))
-				{
-					failure = _lastBatchFailure;
-					return false;
-				}
-				result = new ExternalEnvironmentAcquireResult(created, reused, _environmentByCollider.Count);
-				return true;
-			}
-			catch (Exception exception)
-			{
-				failure = exception.GetType().Name + ": " + exception.Message;
-				return false;
-			}
-		}
+		if (IsFullPrebake) return EnsureFullPrebakeEnvironment(center, sweepEnd, out result, out failure);
 		if (consumerId == 0)
 		{
 			failure = "the proximity-cache consumer id is invalid";
 			return false;
 		}
+		if (TryReuseLastAcquisition(consumerId, center, sweepEnd, out result)) return true;
 
+		// Shared ancestors of the corridor's colliders are classified once for this acquisition.
+		_environmentHierarchy.BeginQuery();
 		try
 		{
-			int count = QueryEnvironment(center, sweepEnd);
-			_proximityUnknownScratch.Clear();
-			_proximityColliderIdsScratch.Clear();
-			int reused = 0;
-			for (int index = 0; index < count; index++)
-			{
-				Collider collider = _overlapBuffer[index];
-				if (!Eligible(collider, includeDisabled: false)) continue;
-				_proximityColliderIdsScratch.Add(collider.GetInstanceID());
-				if (_environmentByCollider.ContainsKey(collider.GetInstanceID())) reused++;
-				else _proximityUnknownScratch.Add(collider);
-			}
-			_meshGeometrySource.PrepareProximity(center, sweepEnd, EnvironmentRadius, _proximityUnknownScratch);
+			// A prefetched region is all reuse: no unknown collider, so no mapping, extraction or owner wait below.
+			int reused = ClassifyRegion(center, sweepEnd, AcquisitionClaimResolution, skipBodyShapes: false);
+			if (_proximityUnknownScratch.Count != 0) _meshGeometrySource.PrepareProximity(center, sweepEnd, EnvironmentRadius, _proximityUnknownScratch);
 			int created = CaptureProximityUnknown("proximity", false);
 			if (!string.IsNullOrEmpty(_lastBatchFailure))
 			{
 				failure = _lastBatchFailure;
 				return false;
 			}
-			_proximityActorsScratch.Clear();
-			foreach (int colliderId in _proximityColliderIdsScratch)
-				if (_environmentByCollider.TryGetValue(colliderId, out EnvironmentActor actor)) _proximityActorsScratch.Add(actor);
-			UpdateProximityConsumer(consumerId, _proximityActorsScratch);
+			if (created != 0) _syncEnvironmentCaptures++;
+			else _environmentFastPaths++;
+			BindClassifiedRegion(consumerId);
+			result = new ExternalEnvironmentAcquireResult(created, reused, _environmentByCollider.Count);
+			RememberAcquisition(consumerId, center, sweepEnd, reused + created);
+			return true;
+		}
+		catch (Exception exception)
+		{
+			failure = exception.GetType().Name + ": " + exception.Message;
+			return false;
+		}
+		finally { _environmentHierarchy.EndQuery(); }
+	}
+
+	/// <summary>
+	/// The same consumer asking for the same corridor again in the frame it was acquired in (a refresh that coincides with a
+	/// wake or a fallback) is already bound. Anything that could invalidate that, a released consumer or a removed actor,
+	/// clears the memo; a collider that appeared between the two calls of one frame is picked up by the next refresh.
+	/// </summary>
+	private bool TryReuseLastAcquisition(uint consumerId, Vector3 center, Vector3 sweepEnd, out ExternalEnvironmentAcquireResult result)
+	{
+		result = default;
+		if (_lastAcquireFrame != Time.frameCount || _lastAcquireConsumer != consumerId || _lastAcquireCasing != _stageCasingEnvironment ||
+			_lastAcquireCenter != center || _lastAcquireSweepEnd != sweepEnd) return false;
+		_environmentFastPaths++;
+		result = new ExternalEnvironmentAcquireResult(0, _lastAcquireKnown, _environmentByCollider.Count);
+		return true;
+	}
+
+	private void RememberAcquisition(uint consumerId, Vector3 center, Vector3 sweepEnd, int known)
+	{
+		_lastAcquireFrame = Time.frameCount;
+		_lastAcquireConsumer = consumerId;
+		_lastAcquireCasing = _stageCasingEnvironment;
+		_lastAcquireCenter = center;
+		_lastAcquireSweepEnd = sweepEnd;
+		_lastAcquireKnown = known;
+	}
+
+	/// <summary>
+	/// Full prebake: unknown colliders are runtime-spawned objects. The acquisition has the same guarantee as the
+	/// ProximityCache one: when it returns, every active eligible collider of its corridor has a native actor, whether it was
+	/// unowned or claimed by a staged late-scene or deferred capture. It captures them synchronously, bounded by the corridor
+	/// (<see cref="ClaimResolution.TakeOver"/>); a casing acquisition drives the claiming jobs instead
+	/// (<see cref="ClaimResolution.Drive"/>) and stays synchronous as before.
+	/// </summary>
+	private bool EnsureFullPrebakeEnvironment(Vector3 center, Vector3 sweepEnd, out ExternalEnvironmentAcquireResult result, out string failure)
+	{
+		result = default;
+		failure = null;
+		_environmentHierarchy.BeginQuery();
+		try
+		{
+			int reused = ClassifyRegion(center, sweepEnd, AcquisitionClaimResolution, skipBodyShapes: true);
+			if (_proximityUnknownScratch.Count != 0) _meshGeometrySource.PrepareProximity(center, sweepEnd, EnvironmentRadius, _proximityUnknownScratch);
+			int created = CaptureProximityUnknown("runtime-proximity", true);
+			if (!string.IsNullOrEmpty(_lastBatchFailure))
+			{
+				failure = _lastBatchFailure;
+				return false;
+			}
 			result = new ExternalEnvironmentAcquireResult(created, reused, _environmentByCollider.Count);
 			return true;
 		}
@@ -350,6 +435,59 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 		{
 			failure = exception.GetType().Name + ": " + exception.Message;
 			return false;
+		}
+		finally { _environmentHierarchy.EndQuery(); }
+	}
+
+	/// <summary>A casing acquisition needs everything in its region created before its step; every other acquisition takes over just its corridor's claims.</summary>
+	private ClaimResolution AcquisitionClaimResolution => _stageCasingEnvironment ? ClaimResolution.Drive : ClaimResolution.TakeOver;
+
+	/// <summary>
+	/// Queries the corridor and sorts its eligible colliders into <c>_proximityColliderIdsScratch</c> (all of them),
+	/// <c>_proximityUnknownScratch</c> (nobody owns them) and the reused count. A collider an asynchronous job has already
+	/// claimed is never captured twice: <paramref name="resolution"/> decides whether the claiming job is driven to
+	/// completion or only the corridor's claimed colliders are taken over (the corridor is then classified again, and the
+	/// colliders taken from a job that had not built their snapshot yet come back as unknown), or whether the collider is left to its job.
+	/// </summary>
+	private int ClassifyRegion(Vector3 center, Vector3 sweepEnd, ClaimResolution resolution, bool skipBodyShapes)
+	{
+		for (int pass = 0; ; pass++)
+		{
+			int count = QueryEnvironment(center, sweepEnd);
+			_proximityUnknownScratch.Clear();
+			_proximityColliderIdsScratch.Clear();
+			_pendingJobsScratch.Clear();
+			_takeOverIdsScratch.Clear();
+			_regionClaimedCount = 0;
+			int reused = 0;
+			for (int index = 0; index < count; index++)
+			{
+				Collider collider = _overlapBuffer[index];
+				if (!Eligible(collider, includeDisabled: false)) continue;
+				int colliderId = collider.GetInstanceID();
+				_proximityColliderIdsScratch.Add(colliderId);
+				if (_environmentByCollider.ContainsKey(colliderId)) reused++;
+				else if (skipBodyShapes && _bodyShapesByCollider.ContainsKey(colliderId)) continue;
+				else if (_claims.TryGetValue(colliderId, out CaptureJob pending))
+				{
+					if (resolution == ClaimResolution.Leave)
+					{
+						_regionClaimedCount++;
+						continue;
+					}
+					if (!_pendingJobsScratch.Contains(pending)) _pendingJobsScratch.Add(pending);
+					_takeOverIdsScratch.Add(colliderId);
+				}
+				else _proximityUnknownScratch.Add(collider);
+			}
+			if (_pendingJobsScratch.Count == 0) return reused;
+			if (pass != 0) throw new InvalidOperationException("A pending environment capture did not settle.");
+			if (resolution == ClaimResolution.Drive)
+			{
+				for (int index = 0; index < _pendingJobsScratch.Count; index++) DriveJob(_pendingJobsScratch[index]);
+				_takeOverIdsScratch.Clear();
+			}
+			else TakeOverClaims();
 		}
 	}
 
@@ -363,10 +501,13 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 
 	public void ReleaseEnvironment(uint consumerId)
 	{
-		if (consumerId == 0 || IsFullPrebake || !_proximityActorsByConsumer.TryGetValue(consumerId, out HashSet<EnvironmentActor> actors)) return;
-		_proximityActorsByConsumer.Remove(consumerId);
-		foreach (EnvironmentActor actor in actors) ReleaseProximityActor(actor);
-		TrimRetainedStaticEnvironment();
+		if (consumerId == 0) return;
+		// A capture still pending for this consumer stops owning anything for it: whatever it commits later is parked, not bound.
+		if (_acquisitions.TryGetValue(consumerId, out PrefetchConsumer request)) DropAcquisition(consumerId, request);
+		if (IsFullPrebake) return;
+		// A promoted prefetch that has not settled must not hand references to a consumer that is gone.
+		DetachJobsOf(consumerId);
+		ReleaseConsumerReferences(consumerId);
 	}
 
 	public bool TryCreateBody(Rigidbody nativeBody, IReadOnlyList<Collider> colliders, uint ownerGroup, bool kinematic, out IExternalPhysicsBody body, out string failure)
@@ -389,24 +530,15 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 		{
 			ActorSnapshot snapshot = ActorSnapshot.CaptureBody(nativeBody, colliders, ownerGroup, kinematic,
 				_options.DeadbodyLayer, _options.EnvironmentMask, collisionProfile);
-			foreach (string skipped in snapshot.SkippedUnsimulatedShapes)
-				if (_reportedSkippedBodyShapes.Add(skipped))
-					Log(ExternalLogLevel.Info, $"External body {nativeBody.name} omits MeshCollider {skipped}: Unity simulates no native shape for it.");
+			_noShapeOmissions += snapshot.SkippedUnsimulatedShapes.Count;
+			if (InfoLoggingActive)
+				foreach (string skipped in snapshot.SkippedUnsimulatedShapes)
+					if (_reportedSkippedBodyShapes.Add(skipped))
+						Log(ExternalLogLevel.Info, $"External body {nativeBody.name} omits MeshCollider {skipped}: Unity simulates no native shape for it.");
 			Vector3 centerOfMass = nativeBody.centerOfMass;
-			ExternalBody created = null;
-			InvokeOwner(() =>
-			{
-				NativeActor native = _scene.CreateActor(snapshot);
-				created = new ExternalBody(this, native.Handle, centerOfMass, snapshot.Body);
-				for (int index = 0; index < snapshot.Shapes.Count && index < native.ShapeHandles.Count; index++)
-				{
-					int colliderId = snapshot.Shapes[index].ColliderId;
-					created.ShapeHandlesByCollider[colliderId] = native.ShapeHandles[index];
-					created.ShapeEnabledByHandle[native.ShapeHandles[index]] = snapshot.Shapes[index].Enabled;
-				}
-			});
-			RegisterBody(created);
-			body = created;
+			BodyCreationItem item = new BodyCreationItem(this, snapshot, BodyShapeKind.Mesh, centerOfMass, null);
+			SubmitCreation(item);
+			body = item.Body;
 			return true;
 		}
 		catch (Exception exception)
@@ -437,16 +569,14 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 			ActorSnapshot snapshot = ActorSnapshot.CaptureTransientConvexBody(nativeBody, shapes, ownerGroup,
 				kinematic, _options.DeadbodyLayer, _options.EnvironmentMask, collisionProfile);
 			BodyCreationTicket ticket = new BodyCreationTicket(this, snapshot, nativeBody.centerOfMass);
-			OwnerWork work = new OwnerWork(() =>
+			DelegateWork work = new DelegateWork(() =>
 			{
-				if (ticket.CancelRequested) return null;
+				if (ticket.CancelRequested) return;
 				NativeActor created = _scene.CreateActor(snapshot);
 				if (!ticket.Result.TryPublish(created)) _scene.DestroyActor(created.Handle);
-				return null;
-			}, 0);
+			}, nameof(BeginCreateTransientConvexBody));
 			ticket.Work = work;
-			lock (_ownerGate) { _activity.Changed(); _ownerQueue.Enqueue(work); }
-			_ownerSignal.Set();
+			EnqueueFifo(work);
 			return ticket;
 		}
 		catch (Exception exception)
@@ -502,17 +632,9 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 		try
 		{
 			ActorSnapshot snapshot = ActorSnapshot.CaptureBoxBody(nativeBody, box, ownerGroup, kinematic, _options.DeadbodyLayer, _options.EnvironmentMask);
-			ExternalBody created = null;
-			ulong shapeHandle = 0;
-			InvokeOwner(() =>
-			{
-				NativeActor native = _scene.CreateActor(snapshot);
-				created = new ExternalBody(this, native.Handle, box.Center, snapshot.Body, snapshot.Body.CenterOfMass.ToUnity());
-				shapeHandle = native.ShapeHandles[0];
-			});
-			BindCompoundColliders(created, sourceColliders, shapeHandle);
-			RegisterBody(created);
-			body = created;
+			BodyCreationItem item = new BodyCreationItem(this, snapshot, BodyShapeKind.Box, box.Center, sourceColliders);
+			SubmitCreation(item);
+			body = item.Body;
 			return true;
 		}
 		catch (Exception exception)
@@ -534,18 +656,9 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 		try
 		{
 			ActorSnapshot snapshot = ActorSnapshot.CaptureRoundedBoxBody(nativeBody, roundedBox, ownerGroup, kinematic, _options.DeadbodyLayer, _options.EnvironmentMask);
-			ExternalBody created = null;
-			ulong shapeHandle = 0;
-			InvokeOwner(() =>
-			{
-				NativeActor native = _scene.CreateActor(snapshot);
-				Vector3 physicalCenter = native.PhysicalCenterOfMass ?? snapshot.Body.CenterOfMass.ToUnity();
-				created = new ExternalBody(this, native.Handle, physicalCenter, snapshot.Body, physicalCenter);
-				shapeHandle = native.ShapeHandles[0];
-			});
-			BindCompoundColliders(created, sourceColliders, shapeHandle);
-			RegisterBody(created);
-			body = created;
+			BodyCreationItem item = new BodyCreationItem(this, snapshot, BodyShapeKind.RoundedBox, snapshot.Body.CenterOfMass.ToUnity(), sourceColliders);
+			SubmitCreation(item);
+			body = item.Body;
 			return true;
 		}
 		catch (Exception exception)
@@ -567,28 +680,11 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 		try
 		{
 			ExternalBody connected = connectedBody as ExternalBody;
-			JointSnapshot snapshot = JointSnapshot.Capture(nativeJoint, child.Handle, connected?.Handle ?? 0);
-			ulong handle = 0;
-			InvokeOwner(() =>
-			{
-				handle = _scene.CreateJoint(snapshot);
-				try
-				{
-					if (!nativeJoint.enableCollision && connected != null)
-						foreach (ulong left in child.ShapeHandlesByCollider.Values)
-							foreach (ulong right in connected.ShapeHandlesByCollider.Values) _scene.IgnoreShapePair(left, right);
-				}
-				catch
-				{
-					_scene.DestroyJoint(handle);
-					handle = 0;
-					throw;
-				}
-			});
-			ExternalJoint created = new ExternalJoint(handle);
-			_joints[handle] = created;
-			_jointSnapshot = null;
-			joint = created;
+			// The body handles are filled in on the owner, so a joint between bodies of an open batch can be queued.
+			JointSnapshot snapshot = JointSnapshot.Capture(nativeJoint, 0, 0);
+			JointCreationItem item = new JointCreationItem(snapshot, child, connected, !nativeJoint.enableCollision && connected != null);
+			SubmitCreation(item);
+			joint = item.Joint;
 			return true;
 		}
 		catch (Exception exception)
@@ -601,9 +697,14 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 	public void IgnoreCollision(Collider left, Collider right)
 	{
 		if (left == null || right == null || _scene == null) return;
-		if (!_bodyShapesByCollider.TryGetValue(left.GetInstanceID(), out ulong leftHandle) ||
-			!_bodyShapesByCollider.TryGetValue(right.GetInstanceID(), out ulong rightHandle)) return;
-		EnqueueOwner(() => _scene?.IgnoreShapePair(leftHandle, rightHandle));
+		int leftId = left.GetInstanceID();
+		int rightId = right.GetInstanceID();
+		CreationBatchScope batch = _creationBatch;
+		if (batch != null && (batch.ContainsCollider(leftId) || batch.ContainsCollider(rightId)))
+			throw new InvalidOperationException("A collider belongs to a body of the open creation batch, which has no native shapes until the batch is disposed.");
+		if (!_bodyShapesByCollider.TryGetValue(leftId, out ulong leftHandle) ||
+			!_bodyShapesByCollider.TryGetValue(rightId, out ulong rightHandle)) return;
+		QueueIgnoreShapePair(leftHandle, rightHandle);
 	}
 
 	public void DestroyJoint(IExternalPhysicsJoint joint)
@@ -612,7 +713,7 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 		external.Invalidate();
 		_joints.Remove(external.Handle);
 		_jointSnapshot = null;
-		EnqueueOwner(() => _scene.DestroyJoint(external.Handle));
+		QueueDestroyJoint(external.Handle);
 	}
 
 	public void DestroyBody(IExternalPhysicsBody body)
@@ -622,7 +723,7 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 		foreach (KeyValuePair<int, ulong> shape in external.ShapeHandlesByCollider)
 			if (_bodyShapesByCollider.TryGetValue(shape.Key, out ulong mapped) && mapped == shape.Value) _bodyShapesByCollider.Remove(shape.Key);
 		external.Invalidate();
-		EnqueueOwner(() => _scene.DestroyActor(external.Handle));
+		QueueDestroyActor(external.Handle);
 	}
 
 	public bool TryApplyBodyStates(IReadOnlyList<ExternalBodyState> states, out string failure)
@@ -694,27 +795,18 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 			ExternalJoint[] joints = _jointSnapshot ?? (_jointSnapshot = _joints.Values.ToArray());
 			ExternalCasingFrame casingFrame = _queuedCasingFrame;
 			_queuedCasingFrame = null;
-			OwnerWork work = null;
-			work = new OwnerWork(() =>
-			{
-				if (casingFrame != null && _ownerFailure != null) throw new InvalidOperationException(_ownerFailure);
-				if (casingFrame != null) work.Phase = "casing commands";
-				if (casingFrame != null) _scene.CasingCommands(casingFrame);
-				long simulationStarted = casingFrame != null ? Stopwatch.GetTimestamp() : 0;
-				work.Phase = "native simulation and body readback";
-				NativeApi.BodyState[] states = _scene.Step(deltaTime, out work.PublishedBodies, out work.AwakeBodies);
-				if (casingFrame != null) casingFrame.SimulationMilliseconds = (Stopwatch.GetTimestamp() - simulationStarted) * 1000d / Stopwatch.Frequency;
-				if (casingFrame != null) work.Phase = "casing readback";
-				if (casingFrame != null) _scene.ReadCasings(casingFrame);
-				work.Phase = "joint publication";
-				foreach (ExternalJoint joint in joints)
-					if (joint.IsValid) joint.PublishBroken(_scene.IsJointBroken(joint.Handle));
-				return states;
-			}, ++_stepSequence);
+			// The single step item is reused: the previous step was consumed by CompleteStep before _stepWork cleared.
+			StepWork work = _stepWorkItem ?? (_stepWorkItem = new StepWork { Name = nameof(SubmitStep) });
+			work.Reset();
+			work.Name = nameof(SubmitStep);
+			work.Sequence = ++_stepSequence;
 			work.DeltaTime = deltaTime;
 			work.CommandVersion = _activity.Version;
+			work.QueuedBehindAsync = _asyncSliceRunning;
+			work.QueuedTimestamp = Stopwatch.GetTimestamp();
 			work.BodyCount = _bodies.Count;
 			work.JointCount = joints.Length;
+			work.Joints = joints;
 			work.CasingFrame = casingFrame;
 			_stepWork = work;
 			_ownerQueue.Enqueue(work);
@@ -727,16 +819,16 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 	{
 		result = default;
 		failure = null;
-		OwnerWork work;
+		StepWork work;
 		lock (_ownerGate) work = _stepWork;
 		if (work == null)
 		{
 			result = new ExternalStepResult(false, false, 0d, 0d, true, _completedSequence);
 			return true;
 		}
-		bool wasReady = work.Completion.Task.IsCompleted;
+		bool wasReady = work.IsCompleted;
 		long waitStarted = Stopwatch.GetTimestamp();
-		bool completed = wasReady || work.Completion.Task.Wait(Math.Max(0, timeoutMilliseconds));
+		bool completed = wasReady || work.Wait(Math.Max(0, timeoutMilliseconds));
 		double mainWait = (Stopwatch.GetTimestamp() - waitStarted) * 1000d / Stopwatch.Frequency;
 		if (!completed)
 		{
@@ -770,17 +862,21 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 	public void ResetRaid()
 	{
 		_queuedCasingFrame = _completedCasingFrame = null;
+		// Static cache with a TerrainCallbacks subscription: it must not outlive the raid on the quarantine early returns below.
+		MeshGeometryRepository.Clear();
 		if (_api == null || _disposed) return;
 		if (_ownerThreadUnresponsive) return;
+		_raidGeneration++;
+		_creationBatch = null;
 		OwnerWork bake = _bakeWork;
-		if (bake != null && !bake.Completion.Task.Wait(Math.Max(0, InitialBakeWatchdogMilliseconds - (int)_bakeStopwatch.ElapsedMilliseconds)))
+		if (bake != null && !bake.Wait(Math.Max(0, InitialBakeWatchdogMilliseconds - (int)_bakeStopwatch.ElapsedMilliseconds)))
 		{
 			QuarantineInitialBake(bake);
 			return;
 		}
-		OwnerWork step;
+		StepWork step;
 		lock (_ownerGate) step = _stepWork;
-		if (step != null && !step.Completion.Task.Wait(500))
+		if (step != null && !step.Wait(500))
 		{
 			_ownerThreadUnresponsive = true;
 			_failure = "External PhysX scene-owner thread did not complete the in-flight step within the 500 ms watchdog.";
@@ -813,7 +909,6 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 		_deferredUnityShapes.Clear();
 		_deferredUnityShapeIds.Clear();
 		_meshGeometrySource?.ResetRaid();
-		MeshGeometryRepository.Clear();
 		_lateScenes.Clear();
 		_lateSceneHandles.Clear();
 		_stepWork = null;
@@ -840,6 +935,9 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 		_bakeSnapshots = null;
 		_bakeCreated = null;
 		_bakeStopwatch.Reset();
+		_bodyPathWarmupQueued = false;
+		_noShapeOmissions = 0L;
+		ResetEnvironmentPipeline();
 	}
 
 	public void Dispose()
@@ -868,7 +966,7 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 	{
 		if (body == null || !body.IsValid) return;
 		NativeApi.BodyState state = body.SnapshotNativeState();
-		EnqueueOwner(() => _scene?.SetBodyState(body.Handle, state, body.IsKinematic, wake));
+		QueueSetBodyState(body.Handle, state, body.IsKinematic, wake);
 	}
 
 	internal void QueueForce(ExternalBody body, uint operation, Vector3 force, Vector3 point, ForceMode mode)
@@ -879,18 +977,15 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 			StructSize = (uint)Marshal.SizeOf<NativeApi.ForceCommand>(), Operation = operation, Actor = body.Handle,
 			Force = new NativeApi.Vec3(force), Position = new NativeApi.Vec3(point), Mode = MapForceMode(mode), Wake = 1
 		};
-		EnqueueOwner(() => _scene?.ApplyForce(command));
+		QueueApplyForce(command);
 	}
 
 	internal void QueueBodyCollision(ExternalBody body, bool enabled)
 	{
 		if (body == null || !body.IsValid) return;
+		body.RequireNativeHandle();
 		foreach (KeyValuePair<ulong, bool> shape in body.ShapeEnabledByHandle)
-		{
-			ulong handle = shape.Key;
-			bool shapeEnabled = enabled && shape.Value;
-			EnqueueOwner(() => _scene?.SetShapeEnabled(handle, shapeEnabled));
-		}
+			QueueShapeEnabled(shape.Key, enabled && shape.Value);
 	}
 
 	private void BuildInitialEnvironment()
@@ -911,7 +1006,7 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 			Log(ExternalLogLevel.Info, $"External PhysX full bake capture complete: colliders={snapshots.Sum(actor => actor.Shapes.Count)}, actors={snapshots.Count}, uniqueMeshes={uniqueMeshes.Count}, uniqueHeightFields={uniqueHeightFields.Count}, estimatedRawGeometryBytes={_rawGeometryBytes}, elapsedMs={_bakeStopwatch.Elapsed.TotalMilliseconds:F1}.");
 			if (_disposed || _ownerThreadUnresponsive) throw new InvalidOperationException("External PhysX owner is unavailable.");
 			NativeApi.UnitySceneSettings sourceSceneSettings = _meshGeometrySource.SourceSceneSettings;
-			OwnerWork work = new OwnerWork(() =>
+			DelegateWork work = new DelegateWork(() =>
 			{
 				// Owner-only: the staged scene replaces _scene only after every actor exists.
 				NativeScene staging = new NativeScene(_api, _options, sourceSceneSettings);
@@ -924,8 +1019,7 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 				NativeScene previous = _scene;
 				_scene = staging;
 				previous?.Dispose();
-				return null;
-			}, 0, name: nameof(BuildInitialEnvironment));
+			}, nameof(BuildInitialEnvironment));
 			_bakeSnapshots = snapshots;
 			_bakeWork = work;
 			lock (_ownerGate) { _activity.Changed(); _ownerQueue.Enqueue(work); }
@@ -941,7 +1035,7 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 	private void PollInitialEnvironment()
 	{
 		OwnerWork work = _bakeWork;
-		if (!work.Completion.Task.IsCompleted)
+		if (!work.IsCompleted)
 		{
 			if (_bakeStopwatch.ElapsedMilliseconds >= InitialBakeWatchdogMilliseconds) QuarantineInitialBake(work);
 			return;
@@ -957,6 +1051,7 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 				throw new InvalidOperationException($"External PhysX owner operation failed: {DescribeException(work.Exception)}", work.Exception);
 			CommitEnvironment(snapshots, created);
 			_ready = true;
+			QueueBodyPathWarmup();
 			_initialColliderCount = snapshots.Sum(actor => actor.Shapes.Count);
 			_initialActorCount = snapshots.Count;
 			_bakeMilliseconds = _bakeStopwatch.Elapsed.TotalMilliseconds;
@@ -1021,10 +1116,12 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 			else InvokeOwner(() => created = _scene.CreateBatch(snapshots));
 			CommitEnvironment(snapshots, created);
 			int shapes = snapshots.Sum(actor => actor.Shapes.Count);
-			int heightFields = snapshots.Sum(actor => actor.Shapes.Count(shape => shape.HeightField != null));
 			if (countAsRuntime) _runtimeSpawnAdditions += shapes;
-			else if (source == "late-scene") _lateSceneAdditions += shapes;
-			Log(ExternalLogLevel.Info, $"External PhysX {source} environment batch committed atomically: actors={snapshots.Count}, colliders={shapes}, heightfields={heightFields}, total={_environmentByCollider.Count}.");
+			if (InfoLoggingActive)
+			{
+				int heightFields = snapshots.Sum(actor => actor.Shapes.Count(shape => shape.HeightField != null));
+				Log(ExternalLogLevel.Info, $"External PhysX {source} environment batch committed atomically: actors={snapshots.Count}, colliders={shapes}, heightfields={heightFields}, total={_environmentByCollider.Count}.");
+			}
 			return shapes;
 		}
 		catch (Exception exception)
@@ -1043,13 +1140,14 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 		Log(ExternalLogLevel.Error, $"External PhysX {_failure}; Unity fallback is required for this raid.");
 	}
 
-	private void CommitEnvironment(List<ActorSnapshot> snapshots, List<NativeActor> actors)
+	private void CommitEnvironment(List<ActorSnapshot> snapshots, List<NativeActor> actors, List<EnvironmentActor> committed = null)
 	{
 		if (snapshots.Count != actors.Count) throw new InvalidOperationException("Native environment transaction returned an unexpected actor count.");
 		for (int index = 0; index < snapshots.Count; index++)
 		{
 			EnvironmentActor environment = new EnvironmentActor(snapshots[index], actors[index]);
 			_environmentActors.Add(environment);
+			committed?.Add(environment);
 			if (environment.Movable) _movableEnvironmentActors.Add(environment);
 			foreach (EnvironmentShape shape in environment.Shapes)
 				if (shape.Collider != null)
@@ -1062,7 +1160,7 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 
 	private void AuditDeferredUnityShapes()
 	{
-		if (_deferredUnityShapeIds.Count == 0) return;
+		if (_deferredUnityShapeIds.Count == 0 || HasActiveJob(CaptureKind.Deferred)) return;
 		int checkedCount = 0;
 		while (checkedCount < DeferredUnityShapeAuditPerFrame && _deferredUnityShapes.Count != 0)
 		{
@@ -1086,17 +1184,22 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 			_deferredUnityShapeAuditIndex++;
 			checkedCount++;
 			if (!collider.enabled || !collider.gameObject.activeInHierarchy) continue;
-			AddEnvironmentBatch(CaptureColliders(new Collider[] { collider }), "deferred-unity-shape", countAsRuntime: true);
-			if (!string.IsNullOrEmpty(_lastBatchFailure))
+			if (_claims.ContainsKey(colliderId)) continue;
+			if (!IsFullPrebake && collider is TerrainCollider terrainCollider)
 			{
-				FailEnvironmentUpdate("deferred-unity-shape", _lastBatchFailure);
-				return;
+				// ProximityCache: a terrain that became active after the last rescan joins the permanent terrain capture instead of being read by a deferred job.
+				TrackTerrain(terrainCollider);
+				continue;
 			}
+			// At most one capture per frame, staged across frames and submitted without waiting.
+			StartDeferredCapture(collider);
+			return;
 		}
 	}
 
 	private void UpdateProximityConsumer(uint consumerId, HashSet<EnvironmentActor> desired)
 	{
+		_lastAcquireFrame = -1;
 		if (!_proximityActorsByConsumer.TryGetValue(consumerId, out HashSet<EnvironmentActor> current))
 		{
 			current = new HashSet<EnvironmentActor>();
@@ -1142,7 +1245,7 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 		{
 			bool shapeEnabled = enabled && shape.Collider != null && shape.Collider.enabled && shape.Collider.gameObject.activeInHierarchy;
 			shape.LastEnabled = shapeEnabled;
-			EnqueueOwner(() => _scene?.SetShapeEnabled(shape.NativeHandle, shapeEnabled));
+			QueueEnvironmentShapeEnabled(shape, shapeEnabled);
 		}
 	}
 
@@ -1166,13 +1269,15 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 	private void RemoveEnvironmentActor(EnvironmentActor actor)
 	{
 		if (actor == null) return;
+		actor.Removed = true;
 		RemoveFromRetainedStaticEnvironment(actor);
+		_lastAcquireFrame = -1;
 		foreach (HashSet<EnvironmentActor> actors in _proximityActorsByConsumer.Values) actors.Remove(actor);
 		foreach (EnvironmentShape shape in actor.Shapes)
 			if (_environmentByCollider.TryGetValue(shape.ColliderId, out EnvironmentActor mapped) && ReferenceEquals(mapped, actor)) _environmentByCollider.Remove(shape.ColliderId);
 		_movableEnvironmentActors.Remove(actor);
 		_environmentActors.Remove(actor);
-		EnqueueOwner(() => _scene?.DestroyActor(actor.Native.Handle));
+		QueueDestroyEnvironmentActor(actor);
 	}
 
 	private void CaptureMovableChanges()
@@ -1182,6 +1287,8 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 		_recentlyMovedBounds.Clear();
 		if (!_movablePollCadence.TryBegin(Time.realtimeSinceStartup)) return;
 		_movablePolls++;
+		_movablePolledThisFrame = true;
+		bool rebuildDeferred = false;
 		for (int index = _movableEnvironmentActors.Count - 1; index >= 0; index--)
 		{
 			_movableRootChecks++;
@@ -1191,7 +1298,8 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 				RemoveEnvironmentActor(actor);
 				continue;
 			}
-			if (!actor.TransformProbe.Changed(actor.Root)) continue;
+			// A pending rebuild is revisited although the transform no longer reports a change: the probe consumed it when the rebuild was deferred.
+			if (!actor.ScaleRebuildPending && !actor.TransformProbe.Changed(actor.Root)) continue;
 			actor.Root.GetPositionAndRotation(out Vector3 position, out Quaternion rotation);
 			Vector3 scale = actor.Root.lossyScale;
 			if ((position - actor.LastPosition).sqrMagnitude > 0.000001f || Quaternion.Angle(rotation, actor.LastRotation) > 0.01f)
@@ -1199,23 +1307,29 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 				actor.LastPosition = position;
 				actor.LastRotation = rotation;
 				NativeApi.Pose pose = new NativeApi.Pose(position, rotation);
-				EnqueueOwner(() => _scene?.SetActorPose(actor.Native.Handle, pose, kinematicTarget: true));
+				QueueEnvironmentActorPose(actor, pose);
 				_movablePoseUpdates++;
 				foreach (EnvironmentShape shape in actor.Shapes)
 					if (shape.Collider != null) _recentlyMovedBounds.Add(shape.Collider.bounds);
 			}
-			if ((scale - actor.LastScale).sqrMagnitude > 0.000001f)
+			if ((scale - actor.LastScale).sqrMagnitude <= 0.000001f)
 			{
-				actor.LastScale = scale;
-				List<Collider> replacementColliders = actor.Shapes.Select(shape => shape.Collider).Where(collider => collider != null).ToList();
-				ActorSnapshot replacement = replacementColliders.Count == 0 ? null : ActorSnapshot.CaptureEnvironment(actor.Root, replacementColliders, true, _options.DeadbodyLayer);
-				if (replacement != null)
-				{
-					EnqueueOwner(() => _scene?.ReplaceActorShapes(actor.Native, replacement));
-					_scaleRebuilds++;
-				}
+				actor.ScaleRebuildPending = false;
+				continue;
 			}
+			// A rebuild snapshots every shape of the actor on the main thread: past the update's budget it waits for the next poll,
+			// which is requested for the next frame instead of the next quarter second.
+			if (SnapshotRebuildBudgetSpent)
+			{
+				actor.ScaleRebuildPending = true;
+				rebuildDeferred = true;
+				continue;
+			}
+			actor.ScaleRebuildPending = false;
+			actor.LastScale = scale;
+			RebuildActorShapes(actor);
 		}
+		if (rebuildDeferred) _movablePollCadence.Expedite();
 	}
 
 	private void AuditEnvironmentShapes()
@@ -1241,7 +1355,7 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 			bool enabled = actorEnabled && shape.Collider != null && shape.Collider.enabled && shape.Collider.gameObject.activeInHierarchy;
 			if (enabled == shape.LastEnabled) continue;
 			shape.LastEnabled = enabled;
-			EnqueueOwner(() => _scene?.SetShapeEnabled(shape.NativeHandle, enabled));
+			QueueEnvironmentShapeEnabled(shape, enabled);
 		}
 	}
 
@@ -1261,101 +1375,58 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 				continue;
 			}
 			if ((actor.Root.position - actor.LastPosition).sqrMagnitude <= 0.000001f && Quaternion.Angle(actor.Root.rotation, actor.LastRotation) <= 0.01f && (actor.Root.lossyScale - actor.LastScale).sqrMagnitude <= 0.000001f) continue;
-			bool promotedToKinematic = TryPromoteStaticActor(actor);
+			// Capped so a burst of moved statics cannot queue unbounded replacements; the audit revisits the actor next lap.
+			if (_promotions.Count >= MaximumPendingPromotions) continue;
+			// A promotion snapshots every shape of the actor on the main thread. Past the update's budget the actor is the next one
+			// visited in the following frame, so a burst of moved statics is spread over frames without skipping anyone.
+			if (SnapshotRebuildBudgetSpent)
+			{
+				_staticAuditIndex--;
+				break;
+			}
+			bool replacementQueued = TryPromoteStaticActor(actor);
 			actor.Movable = true;
 			_movableEnvironmentActors.Add(actor);
 			RemoveFromRetainedStaticEnvironment(actor);
-			Log(ExternalLogLevel.Warning, promotedToKinematic
-				? $"External PhysX static integrity audit reclassified {actor.Root.name} as transform-driven movable geometry and replaced its static actor with a kinematic actor."
+			// The replacement is built at the scale the actor has now. Keeping the old scale here would make the movable poll rebuild
+			// the static actor as well, only for the swap to discard that work.
+			if (replacementQueued) actor.LastScale = actor.Root.lossyScale;
+			Log(ExternalLogLevel.Warning, replacementQueued
+				? $"External PhysX static integrity audit reclassified {actor.Root.name} as transform-driven movable geometry and queued a kinematic replacement actor; the static actor stays until it commits."
 				: $"External PhysX static integrity audit reclassified {actor.Root.name} as transform-driven movable geometry; static-pose propagation remains active because kinematic replacement was unavailable.");
 		}
 	}
 
-	private bool TryPromoteStaticActor(EnvironmentActor actor)
-	{
-		try
-		{
-			List<Collider> colliders = actor.Shapes.Select(shape => shape.Collider).Where(collider => collider != null).ToList();
-			if (colliders.Count == 0) return false;
-			ActorSnapshot replacement = ActorSnapshot.CaptureEnvironment(actor.Root, colliders, movable: true, _options.DeadbodyLayer);
-			bool enabled = IsFullPrebake || actor.References > 0;
-			foreach (ShapeSnapshot shape in replacement.Shapes) shape.Enabled &= enabled;
-			NativeActor previous = actor.Native;
-			NativeActor promoted = null;
-			InvokeOwner(() =>
-			{
-				promoted = _scene.CreateActor(replacement);
-				_scene.DestroyActor(previous.Handle);
-			});
-			actor.ReplaceNative(promoted);
-			return true;
-		}
-		catch (Exception exception)
-		{
-			Log(ExternalLogLevel.Warning, $"External PhysX could not replace moved static actor {actor.Root?.name}: {exception.GetType().Name}: {exception.Message}");
-			return false;
-		}
-	}
-
-	private int QueryEnvironment(Vector3 center, Vector3 sweepEnd)
+	private int QueryEnvironment(Vector3 center, Vector3 sweepEnd, float radius = EnvironmentRadius)
 	{
 		while (true)
 		{
 			int count = (sweepEnd - center).sqrMagnitude <= 0.0001f
-				? Physics.OverlapSphereNonAlloc(center, EnvironmentRadius, _overlapBuffer, _options.EnvironmentMask, QueryTriggerInteraction.Ignore)
-				: Physics.OverlapCapsuleNonAlloc(center, sweepEnd, EnvironmentRadius, _overlapBuffer, _options.EnvironmentMask, QueryTriggerInteraction.Ignore);
+				? Physics.OverlapSphereNonAlloc(center, radius, _overlapBuffer, _options.EnvironmentMask, QueryTriggerInteraction.Ignore)
+				: Physics.OverlapCapsuleNonAlloc(center, sweepEnd, radius, _overlapBuffer, _options.EnvironmentMask, QueryTriggerInteraction.Ignore);
 			if (count < _overlapBuffer.Length) return count;
 			if (_overlapBuffer.Length >= MaximumOverlapCapacity) throw new InvalidOperationException($"Environment overlap exceeded {MaximumOverlapCapacity} colliders.");
 			_overlapBuffer = new Collider[Mathf.Min(MaximumOverlapCapacity, _overlapBuffer.Length * 2)];
 		}
 	}
 
-	private List<ActorSnapshot> CaptureScene(Scene scene)
-	{
-		List<Collider> colliders = new List<Collider>();
-		foreach (GameObject root in scene.GetRootGameObjects()) colliders.AddRange(root.GetComponentsInChildren<Collider>(true));
-		_meshGeometrySource.PrepareAll();
-		return CaptureColliders(colliders);
-	}
-
+	/// <summary>
+	/// Synchronous capture of a collider list into actor snapshots, for the full-bake startup and the EnsureEnvironment
+	/// fallback. Classification is shared with the staged jobs; see <see cref="ClassifyForCapture"/>.
+	/// </summary>
 	private List<ActorSnapshot> CaptureColliders(IReadOnlyList<Collider> colliders, Action<int, int> progress = null)
 	{
-		Dictionary<int, List<Collider>> groups = new Dictionary<int, List<Collider>>();
-		Dictionary<int, Transform> roots = new Dictionary<int, Transform>();
-		Dictionary<int, bool> movable = new Dictionary<int, bool>();
-		foreach (Collider collider in colliders)
-		{
-			int colliderId = collider != null ? collider.GetInstanceID() : 0;
-			if (!Eligible(collider, includeDisabled: true) || _environmentByCollider.ContainsKey(colliderId) || _bodyShapesByCollider.ContainsKey(colliderId)) continue;
-			if (collider is MeshCollider || collider is TerrainCollider)
-			{
-				if (!collider.enabled || !collider.gameObject.activeInHierarchy)
-				{
-					DeferUnityShape(collider);
-					continue;
-				}
-				// Validate and cache the current Unity-owned native shape before it is
-				// grouped into an atomic actor transaction. An active missing shape is
-				// a hard failure; silently committing an incomplete collision scene is
-				// less safe than leaving EFT's native corpse physics active for this raid.
-				if (collider is MeshCollider unityMesh) MeshGeometryRepository.Get(unityMesh);
-				else MeshGeometryRepository.Get((TerrainCollider)collider);
-			}
-			Transform root = MovementRoot(collider, out bool isMovable);
-			int key = root.GetInstanceID();
-			if (!groups.TryGetValue(key, out List<Collider> group)) groups[key] = group = new List<Collider>();
-			group.Add(collider);
-			roots[key] = root;
-			movable[key] = isMovable;
-		}
-		List<ActorSnapshot> snapshots = new List<ActorSnapshot>(groups.Count);
+		CaptureGroups groups = new CaptureGroups();
+		foreach (Collider collider in colliders) ClassifyForCapture(collider, groups, null);
+		List<GroupBuilder> ordered = groups.Ordered;
+		List<ActorSnapshot> snapshots = new List<ActorSnapshot>(ordered.Count);
 		int completed = 0;
-		int progressStride = Math.Max(1, (int)Math.Ceiling(groups.Count / 10d));
-		foreach (KeyValuePair<int, List<Collider>> group in groups)
+		int progressStride = Math.Max(1, (int)Math.Ceiling(ordered.Count / 10d));
+		foreach (GroupBuilder group in ordered)
 		{
-			snapshots.Add(ActorSnapshot.CaptureEnvironment(roots[group.Key], group.Value, movable[group.Key], _options.DeadbodyLayer));
+			snapshots.Add(ActorSnapshot.CaptureEnvironment(group.Root, group.Colliders, group.Movable, _options.DeadbodyLayer));
 			completed++;
-			if (progress != null && (completed == groups.Count || completed % progressStride == 0)) progress(completed, groups.Count);
+			if (progress != null && (completed == ordered.Count || completed % progressStride == 0)) progress(completed, ordered.Count);
 		}
 		return snapshots;
 	}
@@ -1393,6 +1464,9 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 		return _environmentHierarchy.Allows(collider.transform);
 	}
 
+	/// <summary>Main-thread scratch for <see cref="MovementRoot"/>; <c>GetComponents&lt;Component&gt;()</c> would allocate an array per ancestor.</summary>
+	private static readonly List<Component> ComponentScratch = new List<Component>(16);
+
 	private static Transform MovementRoot(Collider collider, out bool movable)
 	{
 		Rigidbody attached = collider.attachedRigidbody;
@@ -1407,7 +1481,8 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 			bool explicitMovementRoot = current.GetComponent<Animator>() != null || current.GetComponent<Animation>() != null;
 			if (!explicitMovementRoot)
 			{
-				foreach (Component component in current.GetComponents<Component>())
+				current.GetComponents(ComponentScratch);
+				foreach (Component component in ComponentScratch)
 				{
 					string name = component?.GetType().Name ?? string.Empty;
 					if (name.IndexOf("Door", StringComparison.OrdinalIgnoreCase) >= 0 ||
@@ -1441,106 +1516,68 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 		return string.Join("|", scenes);
 	}
 
-	private void OwnerLoop()
-	{
-		while (!_disposed && !_ownerThreadUnresponsive)
-		{
-			OwnerWork work = null;
-			lock (_ownerGate)
-			{
-				if (_ownerQueue.Count != 0) work = _ownerQueue.Dequeue();
-			}
-			if (work == null)
-			{
-				_ownerSignal.WaitOne(100);
-				continue;
-			}
-			work.Stopwatch.Start();
-			_executingWork = work;
-			try
-			{
-				object value = work.Action();
-				if (value is NativeApi.BodyState[] states) work.StepStates = states;
-			}
-			catch (Exception exception)
-			{
-				work.Exception = exception;
-				if (work.LatchException) _ownerFailure = exception.GetType().Name + ": " + exception.Message;
-			}
-			finally
-			{
-				work.Stopwatch.Stop();
-				if (work.Stopwatch.ElapsedMilliseconds >= 100)
-					Log(ExternalLogLevel.Warning, $"External PhysX slow owner operation: name={work.Name}, phase={work.Phase}, executionMs={work.Stopwatch.Elapsed.TotalMilliseconds:F3}, dt={work.DeltaTime:F6}, bodies={work.BodyCount}, joints={work.JointCount}, completed=True, quarantined={_ownerThreadUnresponsive}.");
-				_executingWork = null;
-				work.Completion.TrySetResult(true);
-			}
-		}
-		// A quarantined owner may eventually return from native code. It alone can
-		// then release its scene; the main thread never frees resources beneath it.
-		try { _scene?.Dispose(); _scene = null; }
-		catch (Exception exception) { Log(ExternalLogLevel.Error, "External PhysX owner cleanup failed: " + exception.Message); }
-		lock (_ownerGate)
-			while (_ownerQueue.Count > 0)
-			{
-				OwnerWork abandoned = _ownerQueue.Dequeue();
-				abandoned.Exception = new InvalidOperationException("External PhysX owner stopped before this operation.");
-				abandoned.Completion.TrySetResult(true);
-			}
-	}
-
-	private void InvokeOwner(Action action, [CallerMemberName] string name = null)
-	{
-		if (_disposed || _ownerThreadUnresponsive)
-			throw new InvalidOperationException("External PhysX owner is unavailable.");
-		OwnerWork work = new OwnerWork(() => { action(); return null; }, 0, name: name);
-		lock (_ownerGate) { _activity.Changed(); _ownerQueue.Enqueue(work); }
-		_ownerSignal.Set();
-		if (!work.Completion.Task.Wait(500))
-		{
-			_ownerThreadUnresponsive = true;
-			_ready = false;
-			_raidStarted = false;
-			_failure = "External PhysX scene-owner operation exceeded the 500 ms watchdog. The backend is quarantined until process exit. " + DescribeOwner(work);
-			Log(ExternalLogLevel.Error, _failure);
-			throw new TimeoutException(_failure);
-		}
-		if (work.Exception != null)
-			throw new InvalidOperationException($"External PhysX owner operation failed: {DescribeException(work.Exception)}", work.Exception);
-	}
-
-	private string DescribeOwner(OwnerWork waiting)
-	{
-		OwnerWork executing = _executingWork;
-		int queued;
-		lock (_ownerGate) queued = _ownerQueue.Count;
-		return $"waiting={waiting?.Name}, waitingStarted={waiting?.Stopwatch.IsRunning}, executing={executing?.Name ?? "none"}, " +
-			$"phase={executing?.Phase ?? "none"}, executionMs={executing?.Stopwatch.Elapsed.TotalMilliseconds ?? 0:F3}, " +
-			$"dt={executing?.DeltaTime ?? 0:F6}, bodies={executing?.BodyCount ?? 0}, joints={executing?.JointCount ?? 0}, queued={queued}";
-	}
-
-	private static string DescribeException(Exception exception)
-	{
-		if (exception == null) return "unknown failure";
-		System.Text.StringBuilder description = new System.Text.StringBuilder();
-		int depth = 0;
-		for (Exception current = exception; current != null && depth < 8; current = current.InnerException, depth++)
-		{
-			if (description.Length != 0) description.Append(" -> ");
-			description.Append(current.GetType().Name).Append(": ").Append(current.Message);
-		}
-		return description.ToString();
-	}
-
-	private void EnqueueOwner(Action action, [CallerMemberName] string name = null)
+	/// <summary>
+	/// Queues best-effort owner work: unlike <see cref="EnqueueOwner"/> it neither wakes the simulation nor latches a
+	/// failure into <see cref="_ownerFailure"/>, so warmup can never fail a raid. The work must catch its own errors.
+	/// </summary>
+	private void EnqueueQuietOwner(Action action, string name)
 	{
 		if (_disposed || _ownerThreadUnresponsive) return;
-		OwnerWork work = new OwnerWork(() => { action(); return null; }, 0, latchException: true, name: name);
-		lock (_ownerGate) { _activity.Changed(); _ownerQueue.Enqueue(work); }
+		DelegateWork work = DelegateWork.Rent(action, name, latchException: false, fireAndForget: true);
+		lock (_ownerGate) _ownerQueue.Enqueue(work);
 		_ownerSignal.Set();
+	}
+
+	/// <summary>
+	/// Once per raid, after the scene is ready: creates and destroys a throwaway two-capsule actor pair joined by a D6 on
+	/// the owner thread, so the first real corpse build does not pay the cold native body/joint creation cost on its
+	/// own owner round trip. The main thread only builds plain snapshots and enqueues; it never waits.
+	/// </summary>
+	private void QueueBodyPathWarmup()
+	{
+		if (_bodyPathWarmupQueued) return;
+		_bodyPathWarmupQueued = true;
+		// Gate evaluated here on main; the owner thread must not read the config-backed delegate.
+		bool verbose = InfoLoggingActive;
+		ActorSnapshot first = ActorSnapshot.CreateWarmupCapsule(Vector3.zero, _options.DeadbodyLayer, _options.EnvironmentMask);
+		ActorSnapshot second = ActorSnapshot.CreateWarmupCapsule(new Vector3(0f, 0.25f, 0f), _options.DeadbodyLayer, _options.EnvironmentMask);
+		EnqueueQuietOwner(() => WarmBodyPath(first, second, verbose), nameof(QueueBodyPathWarmup));
+	}
+
+	/// <summary>Owner thread: creates then destroys the warmup actors and joint, absorbing and (debug) logging any failure.</summary>
+	private void WarmBodyPath(ActorSnapshot firstSnapshot, ActorSnapshot secondSnapshot, bool verbose)
+	{
+		NativeScene scene = _scene;
+		if (scene == null) return;
+		long started = Stopwatch.GetTimestamp();
+		NativeActor first = null;
+		NativeActor second = null;
+		ulong joint = 0;
+		Exception failure = null;
+		try
+		{
+			first = scene.CreateActor(firstSnapshot);
+			second = scene.CreateActor(secondSnapshot);
+			joint = scene.CreateJoint(JointSnapshot.CreateWarmupD6(first.Handle, second.Handle));
+		}
+		catch (Exception exception) { failure = exception; }
+		try { scene.DestroyJoint(joint); }
+		catch (Exception exception) { failure ??= exception; }
+		try { if (second != null) scene.DestroyActor(second.Handle); }
+		catch (Exception exception) { failure ??= exception; }
+		try { if (first != null) scene.DestroyActor(first.Handle); }
+		catch (Exception exception) { failure ??= exception; }
+		if (!verbose) return;
+		double milliseconds = (Stopwatch.GetTimestamp() - started) * 1000d / Stopwatch.Frequency;
+		Log(ExternalLogLevel.Info, failure == null
+			? $"External PhysX body-path warmup completed on the owner thread in {milliseconds:F2} ms."
+			: $"External PhysX body-path warmup failed after {milliseconds:F2} ms and was ignored: {DescribeException(failure)}");
 	}
 
 	private void Log(ExternalLogLevel level, string message) => _options?.Log?.Invoke(level, message);
+
+	/// <summary>Per-kill and per-capture Info text is formatted only while the host reports debug logging; an unset gate keeps it on.</summary>
+	private bool InfoLoggingActive => _options?.InfoLoggingEnabled?.Invoke() ?? true;
 
 	private static uint MapForceMode(ForceMode mode)
 	{
@@ -1551,27 +1588,6 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 		case ForceMode.Acceleration: return 3;
 		default: return 0;
 		}
-	}
-
-	private sealed class OwnerWork
-	{
-		internal readonly Func<object> Action;
-		internal readonly TaskCompletionSource<bool> Completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-		internal readonly Stopwatch Stopwatch = new Stopwatch();
-		internal readonly long Sequence;
-		internal Exception Exception;
-		internal NativeApi.BodyState[] StepStates;
-		internal ExternalCasingFrame CasingFrame;
-		internal readonly bool LatchException;
-		internal readonly string Name;
-		internal volatile string Phase = "operation";
-		internal float DeltaTime;
-		internal int BodyCount, JointCount;
-		internal int PublishedBodies;
-		internal bool AwakeBodies;
-		internal long CommandVersion;
-		internal OwnerWork(Func<object> action, long sequence, bool latchException = false, [CallerMemberName] string name = null)
-		{ Action = action; Sequence = sequence; LatchException = latchException; Name = name; }
 	}
 
 	private sealed class BodyCreationTicket : IExternalBodyCreation
@@ -1603,7 +1619,7 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 				return ExternalBodyCreationStatus.Succeeded;
 			}
 			if (CancelRequested) return ExternalBodyCreationStatus.Cancelled;
-			if (Work == null || !Work.Completion.Task.IsCompleted) return ExternalBodyCreationStatus.Pending;
+			if (Work == null || !Work.IsCompleted) return ExternalBodyCreationStatus.Pending;
 			if (Work.Exception != null)
 			{
 				failure = DescribeException(Work.Exception);
@@ -1625,7 +1641,7 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 			catch (Exception exception)
 			{
 				failure = exception.GetType().Name + ": " + exception.Message;
-				_runtime.EnqueueOwner(() => _runtime._scene?.DestroyActor(native.Handle));
+				_runtime.QueueDestroyActor(native.Handle);
 				Cancel();
 				return ExternalBodyCreationStatus.Failed;
 			}
@@ -1636,7 +1652,7 @@ public sealed partial class ExternalPhysXRuntime : IExternalPhysicsRuntime, IExt
 			if (_handedOff || CancelRequested) return;
 			CancelRequested = true;
 			NativeActor native = Result.Take();
-			if (native != null) _runtime.EnqueueOwner(() => _runtime._scene?.DestroyActor(native.Handle));
+			if (native != null) _runtime.QueueDestroyActor(native.Handle);
 		}
 
 		public void Dispose() => Cancel();

@@ -9,7 +9,7 @@ foreach ($directory in @('Assets/HeadWounds','ProjectSettings','Packages')) {
 Set-Content -LiteralPath (Join-Path $project 'ProjectSettings/ProjectVersion.txt') 'm_EditorVersion: 2022.3.43f1'
 Set-Content -LiteralPath (Join-Path $project 'Packages/manifest.json') '{"dependencies":{"com.unity.modules.physics":"1.0.0","com.unity.modules.jsonserialize":"1.0.0","com.unity.modules.imageconversion":"1.0.0"}}'
 $sources = @('src/Rupture/Dismemberment/Classes/ManagedGeometryWorker.cs',
-    'src/Rupture/Dismemberment/Classes/ProceduralCutFrameBudget.cs',
+    'src/Rupture/FrameWorkBudget.cs',
     'src/Rupture/Dismemberment/Classes/RendererSource.cs',
     'src/Rupture/Dismemberment/Classes/MeshFrameTransform.cs',
     'src/Rupture/Dismemberment/Classes/Packets/HeadWoundPacket.cs',

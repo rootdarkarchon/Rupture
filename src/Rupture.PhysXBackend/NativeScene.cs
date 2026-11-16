@@ -22,6 +22,12 @@ internal sealed class NativeScene : IDisposable
 	internal long MeshDiskHits { get; private set; }
 	internal long MeshCooks { get; private set; }
 	internal long CookedBytes { get; private set; }
+	/// <summary>Geometries a sliced creation loaded in a preload step (one per owner turn).</summary>
+	internal long GeometryPreloads { get; private set; }
+	/// <summary>Geometries a sliced creation still had to load while attaching shapes because no preload step covered them.</summary>
+	internal long InlineGeometryLoads { get; private set; }
+	/// <summary>Set while a sliced creation attaches shapes, so a mesh or heightfield load inside it is counted as inline.</summary>
+	private bool _requireResident;
 	internal int MaterialCount => _materials.Count;
 
 	internal NativeScene(NativeApi api, ExternalBackendOptions options, NativeApi.UnitySceneSettings sourceSceneSettings)
@@ -33,33 +39,121 @@ internal sealed class NativeScene : IDisposable
 		_api.Check(_api.CreateScene(ref desc, out _handle), "rptpx_create_scene");
 	}
 
+	/// <summary>Shapes a sliced creation attaches per owner turn; an attach with resident geometry takes tens of microseconds.</summary>
+	private const int AttachShapesPerSlice = 16;
+
 	internal NativeActor CreateActor(ActorSnapshot snapshot)
 	{
-		NativeApi.BodyDesc body = snapshot.Body;
-		_api.Check(_api.CreateActor(_handle, ref body, out ulong actorHandle), "rptpx_create_actor");
-		NativeActor actor = new NativeActor(actorHandle);
+		NativeActor actor = BeginActor(snapshot);
 		try
 		{
-			foreach (ShapeSnapshot shape in snapshot.Shapes)
-			{
-				ulong shapeHandle = AttachShape(actorHandle, shape, "rptpx_attach_shape", actor);
-				actor.ShapeHandles.Add(shapeHandle);
-			}
-			if (snapshot.UpdateMassPropertiesFromShapes)
-			{
-				_api.Check(_api.UpdateMassAndInertia(_handle, actorHandle, body.Mass, out NativeApi.Vec3 center), "rptpx_update_mass_and_inertia");
-				actor.PhysicalCenterOfMass = center.ToUnity();
-			}
-			if (actor.TransientMeshHandles.Count > 0)
-				_transientMeshesByActor[actor.Handle] = new List<ulong>(actor.TransientMeshHandles);
+			AttachShapes(actor, snapshot, 0, snapshot.Shapes.Count);
+			FinishActor(actor, snapshot);
 			return actor;
 		}
 		catch
 		{
-			_api.DestroyActor(_handle, actorHandle);
-			foreach (ulong mesh in actor.TransientMeshHandles) _api.DestroyMesh(_handle, mesh);
+			DestroyPartialActor(actor);
 			throw;
 		}
+	}
+
+	/// <summary>
+	/// Advances a resumable creation by one bounded step, so the owner can serve its FIFO between steps. A step is exactly one of:
+	/// loading one geometry (mesh from <c>.pxc</c> or a cook, or one heightfield) that an actor's shapes still need; or creating an
+	/// actor shell and attaching up to <see cref="AttachShapesPerSlice"/> of its shapes, all of whose geometry is resident by then.
+	/// Returns true when every actor exists (<see cref="ActorCreationCursor.Created"/>). A failure destroys what was created.
+	/// </summary>
+	internal bool CreateSlice(ActorCreationCursor cursor)
+	{
+		try
+		{
+			List<ActorSnapshot> snapshots = cursor.Snapshots;
+			if (cursor.ActorIndex >= snapshots.Count) return true;
+			ActorSnapshot snapshot = snapshots[cursor.ActorIndex];
+			List<ShapeSnapshot> shapes = snapshot.Shapes;
+			if (cursor.Building == null)
+			{
+				while (cursor.PreloadIndex < shapes.Count)
+					if (PreloadGeometry(shapes[cursor.PreloadIndex++])) return false;
+				cursor.Building = BeginActor(snapshot);
+				cursor.AttachIndex = 0;
+			}
+			_requireResident = true;
+			try { cursor.AttachIndex = AttachShapes(cursor.Building, snapshot, cursor.AttachIndex, AttachShapesPerSlice); }
+			finally { _requireResident = false; }
+			if (cursor.AttachIndex < shapes.Count) return false;
+			FinishActor(cursor.Building, snapshot);
+			cursor.Created.Add(cursor.Building);
+			cursor.Building = null;
+			cursor.PreloadIndex = 0;
+			return ++cursor.ActorIndex == snapshots.Count;
+		}
+		catch
+		{
+			if (cursor.Building != null) DestroyPartialActor(cursor.Building);
+			cursor.Building = null;
+			foreach (NativeActor actor in cursor.Created) DestroyActor(actor.Handle);
+			cursor.Created.Clear();
+			throw;
+		}
+	}
+
+	private NativeActor BeginActor(ActorSnapshot snapshot)
+	{
+		NativeApi.BodyDesc body = snapshot.Body;
+		_api.Check(_api.CreateActor(_handle, ref body, out ulong actorHandle), "rptpx_create_actor");
+		return new NativeActor(actorHandle);
+	}
+
+	/// <summary>Attaches the shapes from <paramref name="from"/> up to <paramref name="count"/> of them; returns the index of the next unattached shape.</summary>
+	private int AttachShapes(NativeActor actor, ActorSnapshot snapshot, int from, int count)
+	{
+		List<ShapeSnapshot> shapes = snapshot.Shapes;
+		int end = (int)Math.Min((long)shapes.Count, (long)from + count);
+		for (int index = from; index < end; index++)
+			actor.ShapeHandles.Add(AttachShape(actor.Handle, shapes[index], "rptpx_attach_shape", actor));
+		return end;
+	}
+
+	private void FinishActor(NativeActor actor, ActorSnapshot snapshot)
+	{
+		if (snapshot.UpdateMassPropertiesFromShapes)
+		{
+			_api.Check(_api.UpdateMassAndInertia(_handle, actor.Handle, snapshot.Body.Mass, out NativeApi.Vec3 center), "rptpx_update_mass_and_inertia");
+			actor.PhysicalCenterOfMass = center.ToUnity();
+		}
+		if (actor.TransientMeshHandles.Count > 0)
+			_transientMeshesByActor[actor.Handle] = new List<ulong>(actor.TransientMeshHandles);
+	}
+
+	private void DestroyPartialActor(NativeActor actor)
+	{
+		_api.DestroyActor(_handle, actor.Handle);
+		foreach (ulong mesh in actor.TransientMeshHandles) _api.DestroyMesh(_handle, mesh);
+	}
+
+	/// <summary>
+	/// Loads the mesh or heightfield a shape needs when it is not resident yet, which is the expensive part of creating an actor.
+	/// True when it loaded one, so the caller yields before doing anything else. Transient meshes belong to FIFO body creation and
+	/// are never part of an asynchronous creation.
+	/// </summary>
+	private bool PreloadGeometry(ShapeSnapshot shape)
+	{
+		if (shape.TransientMesh) return false;
+		string eftBuild = _options.EftBuild ?? "unknown";
+		if (shape.HeightField != null)
+		{
+			if (_heightFields.ContainsKey(shape.HeightField.CacheKey(eftBuild))) return false;
+			GetHeightField(shape.HeightField);
+		}
+		else
+		{
+			if (shape.Mesh == null || _meshes.ContainsKey(shape.Mesh.CacheKey(eftBuild))) return false;
+			GetMesh(shape.Mesh);
+		}
+		GeometryPreloads++;
+		return true;
 	}
 
 	internal Vector3[] GetShapeWireframe(ulong shape)
@@ -111,9 +205,13 @@ internal sealed class NativeScene : IDisposable
 		}
 	}
 
+	/// <summary>Owner-thread only, so one reusable single-command array keeps queued forces allocation-free.</summary>
+	private readonly NativeApi.ForceCommand[] _forceScratch = new NativeApi.ForceCommand[1];
+
 	internal void ApplyForce(NativeApi.ForceCommand command)
 	{
-		_api.Check(_api.ApplyForces(_handle, new[] { command }, 1), "rptpx_apply_forces");
+		_forceScratch[0] = command;
+		_api.Check(_api.ApplyForces(_handle, _forceScratch, 1), "rptpx_apply_forces");
 	}
 	internal void SetAngularDrives(NativeApi.AngularDriveCommand[] commands) =>
 		_api.Check(_api.SetD6Drives(_handle, commands, (uint)commands.Length), "rptpx_set_d6_drives");
@@ -284,6 +382,12 @@ internal sealed class NativeScene : IDisposable
 		return handle;
 	}
 
+	/// <summary>
+	/// Native mesh handle for a geometry, from the in-memory cache, the <c>.pxc</c> disk cache, or a fresh cook. Owner thread
+	/// only: the disk read happens here, inside asynchronous environment work, so it never blocks the main thread. The cooked
+	/// cache is deliberately not preloaded (it covers every map: ~15k files, ~128 MB); a mesh is read the first time a corridor
+	/// that contains it is created, by the preload step of <see cref="CreateSlice"/> that precedes the creating actor's step.
+	/// </summary>
 	private ulong GetMesh(MeshGeometry geometry, bool transient = false)
 	{
 		if (transient)
@@ -301,6 +405,7 @@ internal sealed class NativeScene : IDisposable
 			MeshMemoryHits++;
 			return handle;
 		}
+		if (_requireResident) InlineGeometryLoads++;
 		string cachePath = Path.Combine(_options.CacheRoot, key + ".pxc");
 		byte[] cooked;
 		if (File.Exists(cachePath))
@@ -338,6 +443,7 @@ internal sealed class NativeScene : IDisposable
 			MeshMemoryHits++;
 			return handle;
 		}
+		if (_requireResident) InlineGeometryLoads++;
 		GCHandle samplePin = default;
 		try
 		{
@@ -365,18 +471,25 @@ internal sealed class NativeScene : IDisposable
 
 	private byte[] Cook(MeshGeometry geometry)
 	{
-		NativeApi.Vec3[] vertices = geometry.Vertices.Select(vertex => new NativeApi.Vec3(vertex)).ToArray();
+		Vector3[] vertexSource = geometry.Vertices;
+		// Vector3 and RptPxVec3 share one 12-byte layout, so the managed array is pinned as-is; the copy remains only for a failed probe.
+		NativeApi.Vec3[] converted = null;
+		if (!NativeApi.Vector3MatchesNativeLayout)
+		{
+			converted = new NativeApi.Vec3[vertexSource.Length];
+			for (int index = 0; index < converted.Length; index++) converted[index] = new NativeApi.Vec3(vertexSource[index]);
+		}
 		uint[] indices = geometry.Indices;
 		GCHandle vertexPin = default;
 		GCHandle indexPin = default;
 		try
 		{
-			vertexPin = GCHandle.Alloc(vertices, GCHandleType.Pinned);
+			vertexPin = converted != null ? GCHandle.Alloc(converted, GCHandleType.Pinned) : GCHandle.Alloc(vertexSource, GCHandleType.Pinned);
 			if (indices.Length != 0) indexPin = GCHandle.Alloc(indices, GCHandleType.Pinned);
 			NativeApi.MeshDesc desc = new NativeApi.MeshDesc
 			{
 				StructSize = (uint)Marshal.SizeOf<NativeApi.MeshDesc>(), Convex = geometry.Convex ? 1u : 0u,
-				Vertices = vertexPin.AddrOfPinnedObject(), VertexCount = (uint)vertices.Length,
+				Vertices = vertexPin.AddrOfPinnedObject(), VertexCount = (uint)vertexSource.Length,
 				Indices = indexPin.IsAllocated ? indexPin.AddrOfPinnedObject() : IntPtr.Zero, IndexCount = (uint)indices.Length, CookingFlags = geometry.CookingOptions
 			};
 			int query = _api.CookMesh(_handle, ref desc, IntPtr.Zero, 0, out uint required);
@@ -412,6 +525,28 @@ internal sealed class NativeActor
 		TransientMeshHandles.AddRange(actor.TransientMeshHandles);
 		PhysicalCenterOfMass = actor.PhysicalCenterOfMass;
 		Handle = actor.Handle;
+	}
+}
+
+/// <summary>
+/// Owner-thread progress of a sliced actor creation (<see cref="NativeScene.CreateSlice"/>): which actor is next, how far its
+/// geometry preload and shape attachment got, and the actors finished so far.
+/// </summary>
+internal sealed class ActorCreationCursor
+{
+	internal readonly List<ActorSnapshot> Snapshots;
+	internal readonly List<NativeActor> Created;
+	internal int ActorIndex;
+	/// <summary>Next shape of the current actor whose geometry still has to be checked for residency.</summary>
+	internal int PreloadIndex;
+	/// <summary>The current actor once its shell exists, and the next of its shapes to attach.</summary>
+	internal NativeActor Building;
+	internal int AttachIndex;
+
+	internal ActorCreationCursor(List<ActorSnapshot> snapshots)
+	{
+		Snapshots = snapshots;
+		Created = new List<NativeActor>(snapshots.Count);
 	}
 }
 
@@ -479,11 +614,20 @@ internal sealed class ActorSnapshot
 
 	internal static ActorSnapshot CaptureEnvironment(Transform root, IReadOnlyList<Collider> colliders, bool movable, int deadbodyLayer)
 	{
-		ActorSnapshot snapshot = new ActorSnapshot { Root = root, Movable = movable };
-		snapshot.Body = StaticOrKinematic(root, movable);
-		uint deadbodyBits = deadbodyLayer >= 0 ? 1u << deadbodyLayer : uint.MaxValue;
-		foreach (Collider collider in colliders) snapshot.Shapes.Add(CaptureShape(collider, root, 0, 1u << collider.gameObject.layer, deadbodyBits));
+		ActorSnapshot snapshot = BeginEnvironment(root, movable);
+		foreach (Collider collider in colliders) snapshot.AddEnvironmentShape(collider, deadbodyLayer);
 		return snapshot;
+	}
+
+	/// <summary>Starts an environment actor whose shapes are added one at a time, so a staged capture can stop between colliders.</summary>
+	internal static ActorSnapshot BeginEnvironment(Transform root, bool movable) =>
+		new ActorSnapshot { Root = root, Movable = movable, Body = StaticOrKinematic(root, movable) };
+
+	/// <summary>Adds one collider's shape; a terrain's geometry comes from the raid-lifetime <see cref="MeshGeometryRepository"/> cache.</summary>
+	internal void AddEnvironmentShape(Collider collider, int deadbodyLayer)
+	{
+		uint deadbodyBits = deadbodyLayer >= 0 ? 1u << deadbodyLayer : uint.MaxValue;
+		Shapes.Add(CaptureShape(collider, Root, 0, 1u << collider.gameObject.layer, deadbodyBits));
 	}
 
 	internal static ActorSnapshot CaptureBody(Rigidbody body, IReadOnlyList<Collider> colliders, uint ownerGroup, bool kinematic,
@@ -674,6 +818,32 @@ internal sealed class ActorSnapshot
 		};
 	}
 
+	/// <summary>
+	/// Throwaway dynamic capsule actor that drives the same native creation path as a corpse bone. Built on the main
+	/// thread from plain values and consumed on the owner thread; it never touches a Unity object after construction.
+	/// </summary>
+	internal static ActorSnapshot CreateWarmupCapsule(Vector3 position, int deadbodyLayer, int environmentMask)
+	{
+		ActorSnapshot snapshot = new ActorSnapshot { Movable = true };
+		snapshot.Body = new NativeApi.BodyDesc
+		{
+			StructSize = (uint)Marshal.SizeOf<NativeApi.BodyDesc>(), Kind = 1u,
+			Pose = new NativeApi.Pose(position, Quaternion.identity),
+			Mass = 1f, SleepThreshold = 0.005f, MaxAngularVelocity = 7f, MaxDepenetrationVelocity = 10f,
+			SolverPositionIterations = 6, SolverVelocityIterations = 1, Flags = 1u,
+			InertiaTensor = new NativeApi.Vec3(Vector3.one), InertiaRotation = new NativeApi.Quat(Quaternion.identity)
+		};
+		uint deadbodyBits = deadbodyLayer >= 0 ? 1u << deadbodyLayer : uint.MaxValue;
+		snapshot.Shapes.Add(new ShapeSnapshot
+		{
+			GeometryKind = 3, LocalPose = new NativeApi.Pose(Vector3.zero, Quaternion.identity),
+			Dimensions = new Vector3(0.06f, 0.1f, 0f), Material = new MaterialKey((PhysicMaterial)null),
+			LayerBits = deadbodyBits, CollidesWithBits = (uint)environmentMask | deadbodyBits,
+			ContactOffset = 0.01f, Enabled = true
+		});
+		return snapshot;
+	}
+
 	private static ShapeSnapshot CaptureShape(Collider collider, Transform actorRoot, uint ownerGroup, uint layerBits, uint collidesWith)
 	{
 		Transform transform = collider.transform;
@@ -746,56 +916,6 @@ internal sealed class ActorSnapshot
 		!float.IsNaN(value.y) && !float.IsInfinity(value.y) && !float.IsNaN(value.z) && !float.IsInfinity(value.z);
 }
 
-internal static class MeshGeometryRepository
-{
-	private static readonly Dictionary<string, MeshGeometry> Cache = new Dictionary<string, MeshGeometry>(StringComparer.Ordinal);
-	private static readonly Dictionary<int, HeightFieldCacheEntry> HeightFieldFrameCache = new Dictionary<int, HeightFieldCacheEntry>();
-	private static IMeshGeometrySource _source;
-
-	internal static void Configure(IMeshGeometrySource source)
-	{
-		_source = source ?? throw new ArgumentNullException(nameof(source));
-		Cache.Clear();
-		HeightFieldFrameCache.Clear();
-	}
-
-	internal static void Clear()
-	{
-		Cache.Clear();
-		HeightFieldFrameCache.Clear();
-	}
-
-	internal static MeshGeometry Get(MeshCollider collider)
-	{
-		if (_source == null) throw new InvalidOperationException("The external mesh geometry source is not configured.");
-		Mesh mesh = collider.sharedMesh;
-		string key = $"{_source.Name}:{mesh.GetInstanceID()}:{collider.convex}:{(uint)collider.cookingOptions}";
-		if (!Cache.TryGetValue(key, out MeshGeometry geometry))
-		{
-			geometry = _source.Read(collider);
-			Cache.Add(key, geometry);
-		}
-		return geometry;
-	}
-
-	internal static HeightFieldGeometry Get(TerrainCollider collider)
-	{
-		if (_source == null) throw new InvalidOperationException("The external Unity PhysX geometry source is not configured.");
-		int colliderId = collider.GetInstanceID();
-		if (HeightFieldFrameCache.TryGetValue(colliderId, out HeightFieldCacheEntry cached) && cached.Frame == Time.frameCount) return cached.Geometry;
-		HeightFieldGeometry geometry = _source.Read(collider);
-		HeightFieldFrameCache[colliderId] = new HeightFieldCacheEntry(Time.frameCount, geometry);
-		return geometry;
-	}
-
-	private sealed class HeightFieldCacheEntry
-	{
-		internal readonly int Frame;
-		internal readonly HeightFieldGeometry Geometry;
-		internal HeightFieldCacheEntry(int frame, HeightFieldGeometry geometry) { Frame = frame; Geometry = geometry; }
-	}
-}
-
 internal enum JointSnapshotKind { Character, Fixed, Distance }
 
 internal sealed class JointSnapshot
@@ -804,6 +924,26 @@ internal sealed class JointSnapshot
 	internal NativeApi.D6JointDesc D6;
 	internal NativeApi.FixedJointDesc Fixed;
 	internal NativeApi.DistanceJointDesc Distance;
+
+	/// <summary>Fills in the two actor handles of a snapshot captured before its bodies had native handles (creation batches).</summary>
+	internal void BindActors(ulong body, ulong connected)
+	{
+		switch (Kind)
+		{
+		case JointSnapshotKind.Character:
+			D6.Actor0 = body;
+			D6.Actor1 = connected;
+			break;
+		case JointSnapshotKind.Fixed:
+			Fixed.Actor0 = body;
+			Fixed.Actor1 = connected;
+			break;
+		case JointSnapshotKind.Distance:
+			Distance.Actor0 = body;
+			Distance.Actor1 = connected;
+			break;
+		}
+	}
 
 	internal static JointSnapshot Capture(Joint joint, ulong body, ulong connected)
 	{
@@ -871,6 +1011,25 @@ internal sealed class JointSnapshot
 		throw new NotSupportedException($"Joint {joint.GetType().FullName} is unsupported.");
 	}
 
+	/// <summary>Throwaway limited D6 joint between two warmup actors; it carries the same descriptor shape as a corpse joint.</summary>
+	internal static JointSnapshot CreateWarmupD6(ulong body, ulong connected)
+	{
+		NativeApi.Pose identity = new NativeApi.Pose(Vector3.zero, Quaternion.identity);
+		return new JointSnapshot
+		{
+			Kind = JointSnapshotKind.Character,
+			D6 = new NativeApi.D6JointDesc
+			{
+				StructSize = (uint)Marshal.SizeOf<NativeApi.D6JointDesc>(), Actor0 = body, Actor1 = connected,
+				LocalPose0 = identity, LocalPose1 = identity, LinearLimit = new NativeApi.Vec3(Vector3.zero),
+				TwistLower = -0.35f, TwistUpper = 0.35f, SwingY = 0.5f, SwingZ = 0.5f,
+				BreakForce = float.MaxValue, BreakTorque = float.MaxValue, Projection = 1u,
+				ProjectionLinearTolerance = 0.01f, ProjectionAngularTolerance = 0.1f,
+				MassScale = 1f, ConnectedMassScale = 1f
+			}
+		};
+	}
+
 	private static Quaternion JointFrame(Vector3 axis, Vector3 swingAxis)
 	{
 		if (axis.sqrMagnitude < 0.000001f) axis = Vector3.right;
@@ -888,11 +1047,15 @@ internal sealed class EnvironmentActor
 	internal readonly Transform Root;
 	internal readonly List<EnvironmentShape> Shapes = new List<EnvironmentShape>();
 	internal bool Movable;
+	/// <summary>Set by the main thread when the actor leaves the registry, so an in-flight asynchronous replacement discards itself.</summary>
+	internal bool Removed;
 	internal int References;
 	internal LinkedListNode<EnvironmentActor> RetainedNode;
 	internal Vector3 LastPosition, LastScale;
 	internal Quaternion LastRotation;
 	internal EnvironmentTransformProbe TransformProbe;
+	/// <summary>A scale rebuild the movable poll deferred past its frame budget; keeps the actor in the next poll although its transform no longer reports a change.</summary>
+	internal bool ScaleRebuildPending;
 
 	internal EnvironmentActor(ActorSnapshot snapshot, NativeActor native)
 	{

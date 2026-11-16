@@ -52,6 +52,9 @@ public static class FractureRuntimeTests
     {
         LimbSeverMaterialProvider.Material = new Material(Shader.Find("Rupture/LimbSeverSurface"));
         LoadNativeTextures();
+        // Runs first on purpose: its first accepted case is the only one that still pays the one-time costs.
+        FractureFirstUseSetup.Prepare(LimbSeverMaterialProvider.Material);
+        FractureNativeFixtureTests.Run();
         var fixture = new Fixture();
         var snapshot = new FractureSurface.Snapshot(fixture.Cloth.sharedMesh);
         double milliseconds = 0;
@@ -276,7 +279,6 @@ public static class FractureRuntimeTests
         Check(replacement.Subscriptions == 5 && ActiveVisuals().Length == expectedSites, "reconnected controller discovers pre-existing fracture");
         Singleton<GameWorld>.Instance = null; FractureSystem.Update();
         Check(ActiveVisuals().Length == 0 && replacement.Subscriptions == 0, "raid teardown clears state and pending work");
-        FractureNativeFixtureTests.Run();
         File.WriteAllText(Path.Combine(Output, "verification.json"), JsonUtility.ToJson(new Report { passed = true, cases = _cases,
             constructionMilliseconds = milliseconds, unchangedUpdateMilliseconds = watch.Elapsed.TotalMilliseconds,
             unchangedUpdateAllocatedBytes = updateBytes, unityVersion = Application.unityVersion }, true));

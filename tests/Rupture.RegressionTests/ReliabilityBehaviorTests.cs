@@ -203,10 +203,25 @@ internal static class ReliabilityBehaviorTests
 		foreach (uint index in indices) bytes.AddRange(BitConverter.GetBytes(index));
 		string expected = Convert.ToHexString(SHA256.HashData(bytes.ToArray())).ToLowerInvariant();
 		Check((string)hash.Invoke(null, new object[] { fixture, indices }) == expected, "allocation-free float writes preserve mesh hash bits and cache identity");
+		// 2049 vertices and 3001 indices span several 12 KiB streaming chunks plus a partial tail; the digest must equal the one-shot byte stream.
+		Vector3[] spanning = new Vector3[2049];
+		for (int index = 0; index < spanning.Length; index++) spanning[index] = new Vector3(index * 0.5f, -index, index * 1e-3f);
+		uint[] spanningIndices = new uint[3001];
+		for (int index = 0; index < spanningIndices.Length; index++) spanningIndices[index] = (uint)(index * 7919);
+		Check((string)hash.Invoke(null, new object[] { spanning, spanningIndices }) == ExpectedHash(spanning, spanningIndices),
+			"chunk-streamed mesh hash equals the one-shot digest across chunk boundaries");
 		Vector3[] large = new Vector3[100000];
 		long before = GC.GetAllocatedBytesForCurrentThread();
 		hash.Invoke(null, new object[] { large, Array.Empty<uint>() });
 		long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
-		Check(allocated < 1500000, "100k vertex hashing allocates only the packed input and digest, bytes=" + allocated);
+		Check(allocated < 100000, "100k vertex hashing streams through a bounded chunk instead of one packed buffer, bytes=" + allocated);
+	}
+
+	private static string ExpectedHash(Vector3[] vertices, uint[] indices)
+	{
+		List<byte> bytes = new List<byte>();
+		foreach (Vector3 vertex in vertices) { bytes.AddRange(BitConverter.GetBytes(vertex.x)); bytes.AddRange(BitConverter.GetBytes(vertex.y)); bytes.AddRange(BitConverter.GetBytes(vertex.z)); }
+		foreach (uint index in indices) bytes.AddRange(BitConverter.GetBytes(index));
+		return Convert.ToHexString(SHA256.HashData(bytes.ToArray())).ToLowerInvariant();
 	}
 }

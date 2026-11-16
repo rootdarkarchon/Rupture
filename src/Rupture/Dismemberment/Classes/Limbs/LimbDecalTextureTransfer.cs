@@ -54,7 +54,8 @@ internal static class LimbDecalTextureTransfer
 		RenderTexture copy = null;
 		try
 		{
-			copy = new RenderTexture(sourceTexture.descriptor)
+			RenderTextureDescriptor descriptor = sourceTexture.descriptor;
+			copy = new RenderTexture(descriptor)
 			{
 				name = $"RPT inherited limb decals {destination.GetInstanceID()}",
 				filterMode = sourceTexture.filterMode,
@@ -62,7 +63,11 @@ internal static class LimbDecalTextureTransfer
 				anisoLevel = sourceTexture.anisoLevel
 			};
 			if (!copy.Create()) throw new InvalidOperationException("copied decal render texture could not be created");
-			Graphics.Blit(sourceTexture, copy);
+			// The copy is created from the source descriptor, so format and size match exactly and a
+			// GPU-side copy replaces the full-screen blit pass. MSAA targets keep the resolving blit.
+			if (descriptor.msaaSamples <= 1 && (SystemInfo.copyTextureSupport & UnityEngine.Rendering.CopyTextureSupport.Basic) != 0)
+				Graphics.CopyTexture(sourceTexture, copy);
+			else Graphics.Blit(sourceTexture, copy);
 			Material material = destination.material;
 			if (material == null)
 				throw new InvalidOperationException("destination renderer has no material instance");

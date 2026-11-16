@@ -13,7 +13,8 @@ namespace Rupture.Ragdolls.Classes
             SoakTextureRegistration, SoakColorMapping, SoakMeshUpload, SoakRenderTargets, SoakDrawSubmit, SoakCompositeSubmit, SoakCommandSubmit, SoakRenderTargetRelease,
             CasingReceiveAndRetire, CasingExposureRelease, CasingListenerAndCapacity, CasingAdmission, CasingMovingCoverage,
             CasingImpactSelection, CasingImpactExposure, CasingImpactCoverage, CasingQueueSubmit, CasingPosePublish, CasingAudio,
-            CasingAudioSelection, CasingAudioSurface, CasingAudioPlayback, CasingCoverageRefresh,
+            CasingAudioSelection, CasingAudioSurface, CasingAudioPlayback, CasingAudioPick, CasingAudioBorrow, CasingAudioConfigure, CasingAudioStart,
+            CasingAudioOcclusion, CasingAudioQueue, CasingCoverageRefresh,
             BloodDecalEmit, BloodDecalUpload, BloodMeshBuild, BloodMeshUpload, BloodParcelSubmit, BloodHistory, BloodClothingSupply, BloodFlow, BloodImpactPrediction
         }
         internal enum MainThreadWork

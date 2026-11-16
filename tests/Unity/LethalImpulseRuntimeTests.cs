@@ -324,6 +324,25 @@ public static partial class LethalImpulseRuntimeTests
             ShotImpactProcessor.Update(); c.NativeStep();
             Check(Near(c.Body.velocity.z, 2.4f) && c.Record == null, "nonlethal/no-terminal-record production completion retains the ordinary amplified impulse");
         }
+        LethalImpulseExperiment.RuptureOnly(); LethalImpulseExperiment.Physical();
+        using (var c = new Case(capture: false))
+        {
+            var shot = MakeShot(c); shot.Projectile = 42; ShotImpactProcessor.Track(shot); shot.IsShotFinished = true;
+            ShadowRagdollWorld.FixtureAwaitImpactWake = true;
+            ShotImpactProcessor.Update(); c.NativeStep();
+            Check(Near(c.Body.velocity.z, 0f), "a finished shot that hit a parked body waits without moving it");
+            // EFT pools Shot objects: the same instance now describes another projectile while the first hit still waits.
+            shot.Ammo = new EFT.InventoryLogic.Ammo(); shot.FireIndex = 7; shot.IsShotFinished = false;
+            shot.BulletMassGram = 9f; shot.VelocityMagnitude = 100f; shot.CurrentDirection = Vector3.forward;
+            ShotImpactProcessor.Track(shot);
+            Check(ShotImpactProcessor.TryGetTrackedContact(shot, 42, out _, out _),
+                "a waiting shot does not make a reused pooled Shot ambiguous for its new lifetime");
+            ShadowRagdollWorld.FixtureAwaitImpactWake = false;
+            ShotImpactProcessor.Update(); c.NativeStep();
+            Check(Near(c.Body.velocity.z, 0f), "a waiting shot neither samples nor completes the reused projectile's flight");
+            shot.IsShotFinished = true; ShotImpactProcessor.Update(); c.NativeStep();
+            Check(Near(c.Body.velocity.z, 0.9f), "the reused projectile applies only its own impulse; the stale waiting hit is dropped");
+        }
         foreach (string runtimeKind in new[] { "standalone", "fika-loaded", "fika-solo-host" })
         foreach (string mode in new[] { "baseline", "stock", "rupture4", "rupture1" })
         foreach (bool stockFirst in new[] { true, false })
@@ -827,7 +846,7 @@ namespace Rupture
     internal sealed class StandaloneRuntime : FixtureRuntime { }
     internal static class MultiplayerRuntime { internal static FixtureRuntime Current = new StandaloneRuntime(); }
     internal sealed class FixtureLog
-    { internal void Initialization(object m) => Debug.Log(m); internal void InitializationWarning(object m) => Debug.LogWarning(m); internal void LogWarning(object m) => Debug.LogWarning(m); internal void LogInfo(object m) => Debug.Log(m); }
+    { internal bool IsDebugEnabled => true; internal void Initialization(object m) => Debug.Log(m); internal void InitializationWarning(object m) => Debug.LogWarning(m); internal void LogWarning(object m) => Debug.LogWarning(m); internal void LogInfo(object m) => Debug.Log(m); }
     internal static class RupturePlugin { internal static FixtureLog Log = new FixtureLog(); }
     internal static class RuptureConfiguration
     {
@@ -911,8 +930,13 @@ namespace Rupture.Ragdolls.Classes
         internal static LethalImpulseNativeFixture Native;
         private static Corpse _corpse; private static Rigidbody _body;
         internal static bool IsExternalBody(Rigidbody body) => Native != null && body == _body;
-        internal static bool TryApplyLocalDetachedGibPointImpulse(Collider collider, Vector3 impulse, Vector3 point, out string name)
-        { name = null; return false; }
+        internal static bool TryApplyLocalDetachedGibPointImpulse(Collider collider, Vector3 impulse, Vector3 point, out string name, out bool awaitingEnvironment)
+        { name = null; awaitingEnvironment = false; return false; }
+        internal static bool FixtureAwaitImpactWake;
+        internal static bool IsAwaitingImpactWake(Corpse corpse, bool independentWeapon) => FixtureAwaitImpactWake;
+        internal enum MainThreadStage { ShotHeadWound, ShotResolve, ShotPrepare, ShotImpulse, ShotLog }
+        internal readonly struct MainThreadTrace : IDisposable { public void Dispose() { } }
+        internal static MainThreadTrace TraceMainThread(MainThreadStage stage, bool active = true) => default;
         internal static bool TryResolveHitCorpse(Collider collider, out Corpse corpse)
         { corpse = collider != null ? collider.GetComponentInParent<Corpse>() : null; return corpse != null; }
         internal static bool IsIndependentWeaponHit(Corpse corpse, Collider collider) => false;
@@ -952,7 +976,7 @@ namespace Rupture.Ragdolls.Classes
         {
             _externalRuntime?.Dispose(); _externalRuntime = null;
             foreach (var extra in AdditionalActors) extra.Dispose(); AdditionalActors.Clear();
-            Native?.Dispose(); Native = null; _corpse = null; _body = null; RigsByRagdoll.Clear(); FixtureDragHeld = false;
+            Native?.Dispose(); Native = null; _corpse = null; _body = null; RigsByRagdoll.Clear(); FixtureDragHeld = false; FixtureAwaitImpactWake = false;
         }
     }
 }

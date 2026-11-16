@@ -259,7 +259,12 @@ internal static partial class ShadowRagdollWorld
 		control.GripIndex = grip;
 		RefreshDragTopology(control);
 		// Explicit control activation is independent of the impact-reactivation option.
-		if (!TryWakeFromImpact(rig)) { RequestDragRelease(control, failed: true); return; }
+		// A settled corpse stays parked in the preparing stage while its corridor is captured; the wait is bounded, then the wake acquires synchronously.
+		if (!BeginWakeFromImpact(rig, allowPending: true, out bool wakePending))
+		{
+			if (!wakePending) RequestDragRelease(control, failed: true);
+			return;
+		}
 		rig.IgnoreNativeStopped = true;
 		if (!RagdollCoordinator.ActivateDragMotion(control.Corpse, control.DeathSequence))
 		{ RequestDragRelease(control, failed: true); return; }
@@ -286,8 +291,12 @@ internal static partial class ShadowRagdollWorld
 			{ RequestDragRelease(control, failed: true); continue; }
 			try
 			{
-				if (control.Input.PendingTranslationId != 0 && !TranslateDragRig(control))
-				{ RequestDragRelease(control, failed: true); continue; }
+				if (control.Input.PendingTranslationId != 0)
+				{
+					if (!TranslateDragRig(control, out bool waitingForEnvironment)) { RequestDragRelease(control, failed: true); continue; }
+					// The translation stays queued, and the grip does not chase its target, until the destination's geometry exists.
+					if (waitingForEnvironment) continue;
+				}
 				DragFrame frame = control.Input.Current;
 				if (frame == null) continue;
 				Vector3 target = Vector3.MoveTowards(control.Hand.Position, frame.GripTarget, control.Request.MaxGripSpeed * deltaTime);
@@ -309,12 +318,16 @@ internal static partial class ShadowRagdollWorld
 		}
 	}
 
-	private static bool TranslateDragRig(DragLease control)
+	private static bool TranslateDragRig(DragLease control, out bool waitingForEnvironment)
 	{
+		waitingForEnvironment = false;
 		ShadowRig rig = control.Rig;
 		Vector3 offset = control.Input.PendingTranslation;
 		Vector3 center = CalculateCenter(rig) + offset;
-		if (!DragInputBuffer.Finite(center) || !TryAcquireEnvironment(rig, center, center, out string failure, out _, out _)) return false;
+		if (!DragInputBuffer.Finite(center)) return false;
+		EnvironmentAcquisition acquisition = AcquireRigEnvironment(rig, ref rig.TranslationWake, center, center, allowPending: true, out string failure);
+		if (acquisition == EnvironmentAcquisition.Pending) { waitingForEnvironment = true; return true; }
+		if (acquisition == EnvironmentAcquisition.Failed) return false;
 		List<ExternalBodyState> states = new List<ExternalBodyState>();
 		for (int i = 0; i < rig.CoreBodies.Count; i++)
 		{

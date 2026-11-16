@@ -29,6 +29,10 @@ public class KillPatch : ModulePatch
 
 	internal static void ProcessDeath(Player __instance, EFT.Ballistics.DamageInfo damageInfo, EBodyPart bodyPartType)
 	{
+		KillWindowTrace.BeginKill(__instance.ProfileId);
+		// ProcessDeath only runs where the death is applied (offline, host, headless): ImpactStateService.Death returns early on a
+		// remote client, whose corpses build from authority packets, so a remote client never prefetches or waits here.
+		ShadowRagdollWorld.RequestDeathPrefetch(__instance);
 		LethalImpulseExperiment.Death(__instance, damageInfo, ImpactStateService.Current, allowCreate: false);
 		RagdollCoordinator.RegisterDeath(__instance, damageInfo, bodyPartType, out _);
 		PulsatingBloodStreamSystem.StopLivingStreams(__instance, publish: true);

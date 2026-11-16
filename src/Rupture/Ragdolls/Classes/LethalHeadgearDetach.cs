@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using EFT;
 using EFT.InventoryLogic;
@@ -17,12 +18,69 @@ internal static class LethalHeadgearDetach
 		internal Vector3 Direction;
 		internal uint Seed;
 		internal float ExpiresAt;
-		internal Func<Item, bool> Equipped;
-		internal Action<Item> StartThrow;
-		internal Action<Item> TimedOut;
 		internal HeadgearThrowEvidence Evidence;
-		internal Func<Item, bool> Completed;
-		internal Func<Item, bool> Failed;
+
+		protected override bool ItemEquipped(Item item)
+		{
+			bool equipped = IsEquipped(Head, item);
+			if (!equipped && !ReferenceEquals(item, WaitingItem))
+				HeadgearDiagnostics.Record(item.Id, $"queued item no longer equipped; skipped,{HeadgearDiagnostics.State(item)}", true);
+			return equipped;
+		}
+
+		protected override void BeginThrow(Item item)
+		{
+			long started = Stopwatch.GetTimestamp();
+			try { StartThrow(item); }
+			finally
+			{
+				long ticks = Stopwatch.GetTimestamp() - started;
+				// Inventory removal and world-loot creation are one heavy main-thread stage.
+				FrameWorkBudget.RecordHeavyStage(ticks);
+				if (ShadowRagdollWorld.PerformanceLoggingEnabled)
+					RupturePlugin.Log.LogInfo($"RPT headgear throw: startThrowMs={ticks * 1000d / Stopwatch.Frequency:F3}, template={item.TemplateId}.");
+			}
+		}
+
+		private void StartThrow(Item item)
+		{
+			Evidence = HeadgearDiagnostics.Begin(item, HeadgearDiagnostics.Identity(Head.Owner));
+			string invalid = MultiplayerRuntime.Current.ValidateHeadgearOwner(Head.Owner);
+			if (invalid == null && Head.HasCurrentAddress?.Invoke(item) != true) invalid = "equipment/address changed before throw";
+			if (invalid != null)
+			{
+				Evidence.Finished = true; Evidence.Error = invalid;
+				HeadgearDiagnostics.Record(item.Id, $"skipped: {invalid},{HeadgearDiagnostics.State(item)}", true);
+				return;
+			}
+			ResolveThrowVelocity(item, Momentum, Direction, ref Seed, out Vector3 velocity, out Vector3 angularVelocity);
+			PendingVelocities[item.Id] = new PendingVelocity(velocity, angularVelocity, Time.realtimeSinceStartup + PendingLifetimeSeconds);
+			// One result observer per throw: the controller callback can arrive after the sequence
+			// moved on, so it must keep this throw's item and evidence rather than the request's current ones.
+			HeadgearThrowEvidence evidence = Evidence;
+			Head.Throw(item, result =>
+			{
+				try { HeadgearDiagnostics.ControllerResult(item, evidence, result); }
+				catch (Exception error) { HeadgearDiagnostics.ObserverFailure(error); }
+			});
+		}
+
+		protected override bool ThrowCompleted(Item item) => Evidence?.Complete == true;
+
+		protected override bool ThrowFailed(Item item)
+		{
+			if (Evidence?.Failure == null) return false;
+			PendingVelocities.Remove(item.Id);
+			HeadgearDiagnostics.Record(item.Id, $"sequence stopped: {Evidence.Failure},{HeadgearDiagnostics.State(item)}", true);
+			return true;
+		}
+
+		protected override void ThrowTimedOut(Item item)
+		{
+			PendingVelocities.Remove(item.Id);
+			HeadgearDiagnostics.Record(item.Id, $"timeout: equipped={IsEquipped(Head, item)},operationFinished={Evidence?.Finished}," +
+				$"success={Evidence?.Successful},worldLoot={Evidence?.WorldCreated},{HeadgearDiagnostics.State(item)}", true);
+		}
 	}
 
 	private readonly struct PendingVelocity
@@ -91,47 +149,6 @@ internal static class LethalHeadgearDetach
 			Seed = seed == 0 ? 1u : seed,
 			ExpiresAt = Time.realtimeSinceStartup + PendingLifetimeSeconds
 		};
-		request.Equipped = item =>
-		{
-			bool equipped = IsEquipped(request.Head, item);
-			if (!equipped && !ReferenceEquals(item, request.WaitingItem))
-				HeadgearDiagnostics.Record(item.Id, $"queued item no longer equipped; skipped,{HeadgearDiagnostics.State(item)}", true);
-			return equipped;
-		};
-		request.StartThrow = item =>
-		{
-			request.Evidence = HeadgearDiagnostics.Begin(item, HeadgearDiagnostics.Identity(head.Owner));
-			string invalid = MultiplayerRuntime.Current.ValidateHeadgearOwner(head.Owner);
-			if (invalid == null && head.HasCurrentAddress?.Invoke(item) != true) invalid = "equipment/address changed before throw";
-			if (invalid != null)
-			{
-				request.Evidence.Finished = true; request.Evidence.Error = invalid;
-				HeadgearDiagnostics.Record(item.Id, $"skipped: {invalid},{HeadgearDiagnostics.State(item)}", true);
-				return;
-			}
-			ResolveThrowVelocity(item, request.Momentum, request.Direction, ref request.Seed, out Vector3 velocity, out Vector3 angularVelocity);
-			PendingVelocities[item.Id] = new PendingVelocity(velocity, angularVelocity, Time.realtimeSinceStartup + PendingLifetimeSeconds);
-			HeadgearThrowEvidence evidence = request.Evidence;
-			request.Head.Throw(item, result =>
-			{
-				try { HeadgearDiagnostics.ControllerResult(item, evidence, result); }
-				catch (Exception error) { HeadgearDiagnostics.ObserverFailure(error); }
-			});
-		};
-		request.Completed = item => request.Evidence?.Complete == true;
-		request.Failed = item =>
-		{
-			if (request.Evidence?.Failure == null) return false;
-			PendingVelocities.Remove(item.Id);
-			HeadgearDiagnostics.Record(item.Id, $"sequence stopped: {request.Evidence.Failure},{HeadgearDiagnostics.State(item)}", true);
-			return true;
-		};
-		request.TimedOut = item =>
-		{
-			PendingVelocities.Remove(item.Id);
-			HeadgearDiagnostics.Record(item.Id, $"timeout: equipped={IsEquipped(head, item)},operationFinished={request.Evidence?.Finished}," +
-				$"success={request.Evidence?.Successful},worldLoot={request.Evidence?.WorldCreated},{HeadgearDiagnostics.State(item)}", true);
-		};
 		AddContainedItem(head, EquipmentSlot.Headwear, request.Items);
 		AddContainedItem(head, EquipmentSlot.Earpiece, request.Items);
 		AddContainedItem(head, EquipmentSlot.FaceCover, request.Items);
@@ -146,7 +163,12 @@ internal static class LethalHeadgearDetach
 	{
 		float now = Time.realtimeSinceStartup;
 		PruneVelocities(now);
-		for (int index = PendingDetaches.Count - 1; index >= 0; index--)
+		// One throw per frame across all corpses, oldest request first, and never in a
+		// frame that already spent its allowance or ran a heavy stage, unless the request
+		// waited MaximumStartWaitSeconds already. Polling an in-flight throw is cheap and always runs.
+		bool frameHasRoom = FrameWorkBudget.CanRunDeferrableStage;
+		bool startAvailable = true;
+		for (int index = 0; index < PendingDetaches.Count;)
 		{
 			PendingDetach request = PendingDetaches[index];
 			if (RuptureConfiguration.AutomaticHeadgearDetachment?.Value == false)
@@ -162,13 +184,25 @@ internal static class LethalHeadgearDetach
 					PendingVelocities.Remove(request.WaitingItem.Id);
 					HeadgearDiagnostics.Record(request.WaitingItem.Id, $"pending sequence retired: headAlive={request.Head?.Bone != null},expired={request.ExpiresAt <= now}", true);
 				}
+				for (int unstarted = request.NextItemIndex + (request.WaitingItem != null ? 1 : 0); unstarted < request.Items.Count; unstarted++)
+				{
+					Item item = request.Items[unstarted];
+					HeadgearDiagnostics.Record(item.Id, $"retired before start: headAlive={request.Head?.Bone != null},expired={request.ExpiresAt <= now},{HeadgearDiagnostics.State(item)}", true);
+				}
 				PendingDetaches.RemoveAt(index);
 				continue;
 			}
 
 			try
 			{
-				if (request.Advance(now, request.Equipped, request.StartThrow, request.TimedOut, request.Completed, request.Failed)) PendingDetaches.RemoveAt(index);
+				bool allowStart = startAvailable && (frameHasRoom || request.StartOverdue(now));
+				bool finished = request.Advance(now, allowStart, out bool started);
+				if (started) startAvailable = false;
+				if (finished)
+				{
+					PendingDetaches.RemoveAt(index);
+					continue;
+				}
 			}
 			catch (Exception exception)
 			{
@@ -176,7 +210,11 @@ internal static class LethalHeadgearDetach
 				PendingDetaches.RemoveAt(index);
 				if (request.WaitingItem != null) HeadgearDiagnostics.Record(request.WaitingItem.Id,
 					$"throw exception: {exception.GetType().Name}: {exception.Message}", true);
+				// A throw that faulted partway may have run inventory work already.
+				startAvailable = false;
+				continue;
 			}
+			index++;
 		}
 	}
 

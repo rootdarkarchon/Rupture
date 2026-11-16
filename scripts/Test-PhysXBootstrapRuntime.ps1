@@ -8,7 +8,7 @@ foreach ($directory in @('Assets/Bootstrap','Assets/Plugins/x86_64','ProjectSett
 }
 Set-Content -LiteralPath (Join-Path $project 'ProjectSettings/ProjectVersion.txt') 'm_EditorVersion: 2022.3.43f1'
 Set-Content -LiteralPath (Join-Path $project 'Packages/manifest.json') '{"dependencies":{"com.unity.modules.physics":"1.0.0","com.unity.modules.terrainphysics":"1.0.0"}}'
-foreach ($source in @('src/Rupture.PhysXBackend/MeshGeometrySources.cs','src/Rupture.PhysXBackend/MeshGeometry.cs',
+foreach ($source in @('src/Rupture.PhysXBackend/MeshGeometrySources.cs','src/Rupture.PhysXBackend/MeshGeometry.cs','src/Rupture.PhysXBackend/MeshGeometryRepository.cs','src/Rupture.PhysXBackend/PeakCost.cs',
     'src/Rupture.PhysXBackend/NativeApi.cs','src/Rupture/Ragdolls/External/ExternalPhysicsContracts.cs',
     'src/Rupture/Ragdolls/External/ExternalCasingContracts.cs','src/Rupture/Ragdolls/Classes/PhysicsBootstrapProbeLease.cs',
     'tests/Unity/PhysXBootstrapRuntimeTests.cs')) {

@@ -12,12 +12,15 @@ internal sealed class EnvironmentHierarchyFilter
     private readonly HashSet<Transform> _excluded = new HashSet<Transform>();
     private readonly List<Transform> _path = new List<Transform>(16);
     private readonly List<Component> _components = new List<Component>(16);
+    private int _queryDepth;
     private bool _query;
     internal long Visits { get; private set; }
     internal long Hits { get; private set; }
-    internal void BeginQuery() { Clear(); _query = true; }
-    internal void EndQuery() { Clear(); _query = false; }
-    internal void Reset() { EndQuery(); Visits = Hits = 0; }
+    // Queries nest (a scan slice inside a casing acquisition that drives it): only the outermost begin clears and only
+    // the outermost end stops memoizing, and an unbalanced end never underflows.
+    internal void BeginQuery() { if (_queryDepth++ == 0) Clear(); _query = true; }
+    internal void EndQuery() { if (_queryDepth > 0 && --_queryDepth != 0) return; _queryDepth = 0; Clear(); _query = false; }
+    internal void Reset() { _queryDepth = 0; EndQuery(); Visits = Hits = 0; }
     private void Clear() { _allowed.Clear(); _excluded.Clear(); _path.Clear(); _components.Clear(); }
     internal bool Allows(Transform transform)
     {

@@ -5,6 +5,10 @@
     <AssemblyName>Rupture.RegressionTests</AssemblyName>
   </PropertyGroup>
 
+  <ItemGroup>
+    <Compile Include="..\..\src\Rupture\Ragdolls\Classes\HeadgearThrowSequence.cs" Link="Linked\HeadgearThrowSequence.cs" />
+  </ItemGroup>
+
 	<ItemGroup>
     <None Include="Fixtures/FikaProtocol4.json" CopyToOutputDirectory="PreserveNewest" />
 		<Reference Include="Newtonsoft.Json">

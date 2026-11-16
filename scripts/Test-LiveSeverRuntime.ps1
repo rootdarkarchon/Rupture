@@ -42,7 +42,7 @@ function Get-ProductionMember([string]$source, [string]$marker) {
 $corpseMembers = foreach ($marker in @('private sealed class ShadowBody', 'private sealed class ShadowRig',
     'private sealed class ExternalJointBinding', 'private sealed class PendingColliderDisable',
     'private static bool IsRemovedBody(', 'private static bool IsPreseveredBody(',
-    'private static List<Collider> GetAttachedBodyColliders(', 'private static void MergeColliderDisable(',
+    'private static List<Collider> GetAttachedBodyColliders(', 'private static void GetSimulatedBodyColliders(', 'private static void MergeColliderDisable(',
     'private static PendingColliderDisable CaptureColliderDisable(', 'private static void ApplyColliderDisable(',
     'private static void ParkSeveredBody(', 'private static ShadowBody FindRetainedParentBody(',
     'private static void UpdateParkedBodyPose(', 'private static void RemoveSeveredBodyJoints(',

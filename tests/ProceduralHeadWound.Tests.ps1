@@ -119,11 +119,11 @@ foreach ($needle in @('RendererSource.TryGetLodLevel(r, out int level) && level 
 }
 $limbStages = Read-RepoFile 'src/Rupture/Dismemberment/Classes/Limbs/LimbDismembermentSystem.cs'
 foreach ($consumer in @($system, $limbStages)) {
-    foreach ($needle in @('ProceduralCutFrameBudget.CanRunStage', 'ProceduralCutFrameBudget.RecordStage')) {
+    foreach ($needle in @('FrameWorkBudget.CanRunStage', 'FrameWorkBudget.RecordStage')) {
         Require-Text $consumer $needle "Both procedural pipelines must charge and obey the shared frame allowance: $needle"
     }
 }
-foreach ($needle in @('ProceduralCutFrameBudget.BeginFrame', 'bool headCutsFirst = (Time.frameCount & 1) == 0', 'if (headCutsFirst)', 'if (!headCutsFirst)', 'HeadWoundSystem.PrepareResources()')) {
+foreach ($needle in @('FrameWorkBudget.BeginFrame', 'bool headCutsFirst = (Time.frameCount & 1) == 0', 'if (headCutsFirst)', 'if (!headCutsFirst)', 'HeadWoundSystem.PrepareResources()')) {
     Require-Text $entry $needle "The plugin must reset one allowance and alternate access without starving either pipeline: $needle"
 }
 foreach ($needle in @('ApplyFilteredIndicesPartOnMainThread', 'AcquireFromMeshPartOnMainThread', 'build.Replacement.SetActive(false)',
@@ -250,7 +250,7 @@ foreach ($needle in @('private void LateUpdate()', 'renderer.enabled = false', '
 foreach ($slot in @('EquipmentSlot.Headwear', 'EquipmentSlot.Earpiece', 'EquipmentSlot.FaceCover', 'EquipmentSlot.Eyewear')) {
     Require-Text $headgear $slot "Lethal headgear sequence omits $slot."
 }
-foreach ($needle in @('WaitingItem', 'controller().ThrowItem(item, false, callback)', 'item.TotalWeight', 'PendingVelocities[item.Id]', 'request.Evidence?.Complete', 'ValidateHeadgearOwner')) {
+foreach ($needle in @('WaitingItem', 'controller().ThrowItem(item, false, callback)', 'item.TotalWeight', 'PendingVelocities[item.Id]', 'Evidence?.Complete', 'ValidateHeadgearOwner')) {
     Require-Text $headgear $needle "Ordered canonical headgear throw contract is missing: $needle"
 }
 Require-Text $headgear 'TryConsume(Item item' "Lethal headgear launch requests cannot be consumed by the canonical throw patch after activation."
@@ -266,9 +266,12 @@ foreach ($needle in @('PendingHeadWounds', 'RejectRetiredSequence(packet.Profile
 }
 Require-Text $system 'MultiplayerRuntime.Current.IsHeadless' "Dedicated headless authorities are not excluded from local mesh generation."
 
+$textures = Read-RepoFile "src\Rupture\EftWoundTextures.cs"
 foreach ($textureName in @('decal_flesh2', 'decal_flesh2_nrm', 'blood_splash_d', 'blood_splash_n')) {
-    Require-Text $material $textureName "Runtime material does not require EFT texture $textureName."
+    Require-Text $textures $textureName "Shared EFT texture source does not resolve $textureName."
 }
+Require-Text $material 'EftWoundTextures.Ready' "Runtime material does not read the shared EFT texture cache."
+if ($material.Contains('FindObjectsOfTypeAll')) { throw "Head wound material must not scan loaded textures on a first-use path." }
 Require-Text $material 'rupture-wound' "Runtime material does not resolve the project-owned wound shader bundle."
 Require-Text $shader '#pragma surface surf Standard' "Wound shader does not use the built-in opaque Standard lighting path."
 Require-Text $shader 'output.Smoothness = lerp' "Wound shader does not layer wet-region smoothness."

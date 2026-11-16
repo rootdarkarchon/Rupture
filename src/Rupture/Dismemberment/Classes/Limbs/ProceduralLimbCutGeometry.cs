@@ -80,8 +80,13 @@ internal static partial class ProceduralLimbCutGeometry
 			_source = (SourceData)source;
 			_bones = (BoneSnapshot[])bones;
 			_cuts = (CapturedCut[])cuts;
-			_initialCacheKeys = _cuts.Select(cut => cut.CacheKey).ToArray();
-			_initialLevels = _cuts.Select(cut => cut.Level).ToArray();
+			_initialCacheKeys = new string[_cuts.Length];
+			_initialLevels = new LimbSeverLevel[_cuts.Length];
+			for (int index = 0; index < _cuts.Length; index++)
+			{
+				_initialCacheKeys[index] = _cuts[index].CacheKey;
+				_initialLevels[index] = _cuts[index].Level;
+			}
 		}
 
 		internal LimbSeverLevel RequestedLevel(int cutIndex) => _initialLevels[cutIndex];
@@ -744,7 +749,8 @@ internal static partial class ProceduralLimbCutGeometry
 		float worldScale = AverageScale(rendererTransform.lossyScale);
 		int paletteSignature = BonePaletteSignature(bones);
 		CapturedCut[] capturedCuts = new CapturedCut[activeCuts.Count];
-		string[] boneNames = capturedBones.Select(b => b.Name).ToArray();
+		string[] boneNames = new string[capturedBones.Length];
+		for (int index = 0; index < boneNames.Length; index++) boneNames[index] = capturedBones[index].Name;
 		for (int cutIndex = 0; cutIndex < activeCuts.Count; cutIndex++)
 		{
 			CutSpec spec = activeCuts[cutIndex];
@@ -771,6 +777,7 @@ internal static partial class ProceduralLimbCutGeometry
 				failure = $"the renderer bone palette does not contain the complete limb chain for cut {cutIndex}";
 				return false;
 			}
+			ulong bindHash = BindFramesHash(proximalBind, jointBind, distalBind);
 			List<int> limbBones = new List<int>();
 			for (int index = 0; index < bones.Length; index++)
 				if (bones[index] == spec.LimbRoot || bones[index] != null && bones[index].IsChildOf(spec.LimbRoot))
@@ -778,13 +785,13 @@ internal static partial class ProceduralLimbCutGeometry
 			capturedCuts[cutIndex] = new CapturedCut
 			{
 				PaletteKey = $"{paletteSignature}:{Array.IndexOf(bones, spec.ProximalStart)}:{Array.IndexOf(bones, spec.Joint)}:{Array.IndexOf(bones, spec.DistalEnd)}:{spec.IsLeg}:{worldScale:R}" +
-					BindFrameKey(proximalBind) + BindFrameKey(jointBind) + BindFrameKey(distalBind),
+					":bind:" + bindHash.ToString("X16"),
 				ProximalBind = proximalBind, JointBind = jointBind, DistalBind = distalBind,
 				StartBind = spec.Level == LimbSeverLevel.Proximal ? proximalBind : jointBind,
 				EndBind = spec.Level == LimbSeverLevel.Proximal ? jointBind : distalBind,
 				ProximalIndex = Array.IndexOf(bones, spec.ProximalStart), JointIndex = Array.IndexOf(bones, spec.Joint), DistalIndex = Array.IndexOf(bones, spec.DistalEnd),
-				ProximalBones = Enumerable.Range(0, bones.Length).Where(i => bones[i] != null && (bones[i] == spec.ProximalStart || bones[i].IsChildOf(spec.ProximalStart))).ToArray(),
-				DistalBones = Enumerable.Range(0, bones.Length).Where(i => bones[i] != null && (bones[i] == spec.Joint || bones[i].IsChildOf(spec.Joint))).ToArray(),
+				ProximalBones = SubtreeBoneIndices(bones, spec.ProximalStart),
+				DistalBones = SubtreeBoneIndices(bones, spec.Joint),
 				CacheKey = $"{paletteSignature}:{startIndex}:{endIndex}:{rootIndex}:{spec.Level}:{spec.IsLeg}:{worldScale:R}:{spec.FractionOffset:R}",
 				StartIndex = startIndex,
 				EndIndex = endIndex,
@@ -799,15 +806,64 @@ internal static partial class ProceduralLimbCutGeometry
 				FractionOffset = spec.FractionOffset,
 				WorldScale = worldScale
 			};
-			capturedCuts[cutIndex].CacheKey += BindFrameKey(proximalBind) + BindFrameKey(jointBind) + BindFrameKey(distalBind);
+			capturedCuts[cutIndex].CacheKey += ":bind:" + bindHash.ToString("X16");
 		}
 		work = new ClassificationWork(data, capturedBones, capturedCuts);
 		return true;
 	}
 
+	/// <summary>
+	/// Full-precision text form of a bind frame. Only the clothing-case diagnostics use it, so its
+	/// output stays stable for capture grouping; runtime cache keys use <see cref="BindFramesHash"/>.
+	/// </summary>
 	private static string BindFrameKey(Matrix4x4? frame) => frame.HasValue
 		? ":bind:" + string.Join(",", Enumerable.Range(0, 16).Select(i => frame.Value[i].ToString("R", System.Globalization.CultureInfo.InvariantCulture)))
 		: ":missing";
+
+	/// <summary>Main-thread scratch for <see cref="SubtreeBoneIndices"/>; classification capture never runs on the worker.</summary>
+	private static readonly List<int> SubtreeBoneScratch = new List<int>();
+
+	/// <summary>
+	/// Deterministic 64-bit hash over the raw float bits of up to three bind frames (and which of them
+	/// are present). Equal frames always hash equally; the cache keys that embed it also carry the
+	/// palette signature, bone indices, level and scale, so a collision would need a 64-bit match
+	/// within an otherwise identical cut.
+	/// </summary>
+	private static ulong BindFramesHash(Matrix4x4? first, Matrix4x4? second, Matrix4x4? third)
+	{
+		ulong hash = 14695981039346656037UL;
+		hash = MixBindFrame(hash, first);
+		hash = MixBindFrame(hash, second);
+		return MixBindFrame(hash, third);
+	}
+
+	private static ulong MixBindFrame(ulong hash, Matrix4x4? frame)
+	{
+		if (!frame.HasValue) return MixHash(hash, 0x4D495353UL);
+		Matrix4x4 matrix = frame.Value;
+		hash = MixHash(hash, 0x50524553UL);
+		for (int index = 0; index < 16; index++)
+			hash = MixHash(hash, (uint)BitConverter.SingleToInt32Bits(matrix[index]));
+		return hash;
+	}
+
+	private static ulong MixHash(ulong hash, ulong value)
+	{
+		ulong mixed = (hash ^ value) + 0x9E3779B97F4A7C15UL;
+		mixed = (mixed ^ (mixed >> 30)) * 0xBF58476D1CE4E5B9UL;
+		mixed = (mixed ^ (mixed >> 27)) * 0x94D049BB133111EBUL;
+		return mixed ^ (mixed >> 31);
+	}
+
+	/// <summary>Indices of the palette bones that are <paramref name="root"/> or its descendants.</summary>
+	private static int[] SubtreeBoneIndices(Transform[] bones, Transform root)
+	{
+		List<int> scratch = SubtreeBoneScratch;
+		scratch.Clear();
+		for (int index = 0; index < bones.Length; index++)
+			if (bones[index] != null && (bones[index] == root || bones[index].IsChildOf(root))) scratch.Add(index);
+		return scratch.ToArray();
+	}
 
 	internal static bool TryMapBindFrame(Transform target, Transform[] sourceBones, Matrix4x4[] sourceBindposes,
 		Transform[] referenceBones, Matrix4x4[] referenceBindposes, out Matrix4x4 frame)

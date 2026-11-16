@@ -3,6 +3,9 @@
 // Unity skinning, rendering and native LOD registration run the production code.
 using System;
 using System.Collections.Generic;
+using System.Reflection;
+using Rupture.Dismemberment.Classes.Fractures;
+using Rupture.Dismemberment.Classes.Limbs;
 using UnityEngine;
 public enum EBodyPart { Head, Chest, Stomach, LeftArm, RightArm, LeftLeg, RightLeg, Common }
 namespace EFT.HealthSystem
@@ -37,10 +40,27 @@ namespace EFT.HealthSystem
 public class OfflineHealthController : ActiveHealthController { }
 public class NetworkHealthController : ActiveHealthController { }
 }
+namespace Diz.Skinning
+{
+    public class AbstractSkin { public SkinnedMeshRenderer SkinnedMeshRenderer; }
+}
 namespace EFT
 {
     public enum EBodyModelPart { Body, Feet, Hands }
-    public sealed class FixtureSkin { public readonly List<Renderer> Renderers = new List<Renderer>(); public IEnumerable<Renderer> GetRenderers() => Renderers; }
+    // Mirrors LoddedSkin._lods: production walks the LOD skins directly instead of GetRenderers().
+    public sealed class FixtureSkin
+    {
+        public readonly List<Renderer> Renderers = new List<Renderer>();
+        public Diz.Skinning.AbstractSkin[] _lods
+        {
+            get
+            {
+                var lods = new Diz.Skinning.AbstractSkin[Renderers.Count];
+                for (int i = 0; i < lods.Length; i++) lods[i] = new Diz.Skinning.AbstractSkin { SkinnedMeshRenderer = Renderers[i] as SkinnedMeshRenderer };
+                return lods;
+            }
+        }
+    }
     public sealed class FixtureBody { public readonly Dictionary<EBodyModelPart, FixtureSkin> BodySkins = new Dictionary<EBodyModelPart, FixtureSkin>(); }
     public sealed class Player : MonoBehaviour
     {
@@ -89,6 +109,64 @@ namespace Rupture.Dismemberment.Classes.BloodStreams
         internal static bool UpdateFractureWound(uint id, Transform anchor, Vector3 point, Vector3 direction)
         { if (!Active.ContainsKey(id)) return false; Active[id] = anchor; return true; }
         internal static void StopFractureWound(uint id) { Active.Remove(id); }
+    }
+}
+/// <summary>
+/// Reproduces what a raid does before its first fracture, so the fixture's first accepted case measures only what
+/// is left. <c>RPT_FRACTURE_FIRST_USE</c> selects: <c>cold</c> (nothing), <c>prejit-old</c> (the four fracture types
+/// that were pre-JIT before the warmup existed), <c>prejit</c> (the current RaidWarmup pre-JIT list) or
+/// <c>warm</c> (that list plus the production <see cref="FractureWarmup"/>, the default).
+/// </summary>
+internal static class FractureFirstUseSetup
+{
+    internal static void Prepare(Material material)
+    {
+        string mode = Environment.GetEnvironmentVariable("RPT_FRACTURE_FIRST_USE") ?? "warm";
+        UnityEngine.Debug.Log("Fracture first-use mode: " + mode);
+        if (mode == "cold") return;
+        var types = new List<Type> { typeof(FractureSystem), typeof(FractureSurface), typeof(FractureVisual), typeof(FractureAppearance) };
+        if (mode != "prejit-old") { types.Add(typeof(ProceduralLimbWoundGeometry)); types.Add(typeof(LimbSeverMath)); }
+        long mark = System.Diagnostics.Stopwatch.GetTimestamp();
+        int methods = 0;
+        foreach (Type type in types) methods += PreJit(type);
+        UnityEngine.Debug.Log("Fracture first-use pre-JIT: methods=" + methods + ", ms=" + Lap(ref mark));
+        if (mode != "warm") return;
+        for (int stage = 0; ; stage++)
+        {
+            bool done = FractureWarmup.Step(material);
+            UnityEngine.Debug.Log("Fracture first-use warmup stage " + stage + ": ms=" + Lap(ref mark));
+            if (done) break;
+        }
+        if (!FractureWarmup.Warmed) throw new Exception("fracture warmup did not complete");
+    }
+
+    // Same member selection as RaidWarmup.PreJit: every constructor and method with an IL body, nested types included.
+    private static int PreJit(Type type)
+    {
+        const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly;
+        if (type.ContainsGenericParameters) return 0;
+        int count = 0;
+        var methods = new List<MethodBase>();
+        methods.AddRange(type.GetConstructors(flags));
+        methods.AddRange(type.GetMethods(flags));
+        foreach (MethodBase method in methods)
+        {
+            if (method.IsAbstract || method.ContainsGenericParameters || (method.Attributes & MethodAttributes.PinvokeImpl) != 0) continue;
+            MethodImplAttributes impl = method.GetMethodImplementationFlags();
+            if ((impl & MethodImplAttributes.InternalCall) != 0 || (impl & MethodImplAttributes.CodeTypeMask) != MethodImplAttributes.IL) continue;
+            method.MethodHandle.GetFunctionPointer();
+            count++;
+        }
+        foreach (Type nested in type.GetNestedTypes(flags)) count += PreJit(nested);
+        return count;
+    }
+
+    private static double Lap(ref long mark)
+    {
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
+        double milliseconds = (now - mark) * 1000d / System.Diagnostics.Stopwatch.Frequency;
+        mark = now;
+        return Math.Round(milliseconds, 3);
     }
 }
 #endif

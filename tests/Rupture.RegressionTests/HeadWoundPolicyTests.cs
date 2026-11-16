@@ -52,38 +52,5 @@ internal static class HeadWoundPolicyTests
 		order = Activator.CreateInstance(orderType, true);
 		Queue(3); Discard(3); Queue(1); Complete(1);
 		Check(Next() == 2, "discarding a later wound never skips a predecessor that has not arrived");
-
-        Type sequenceType = assembly.GetType("Rupture.Ragdolls.Classes.HeadgearThrowSequence`1", true).MakeGenericType(typeof(string));
-        object sequence = Activator.CreateInstance(sequenceType, true);
-        var items = (List<string>)sequenceType.GetField("Items", Flags).GetValue(sequence);
-        items.AddRange(new[] { "helmet", "earpiece", "mask", "glasses" });
-        var equipped = new HashSet<string> { "helmet", "mask", "glasses" };
-        var throws = new List<string>(); var timeouts = new List<string>();
-        Func<string, bool> isEquipped = equipped.Contains;
-        var completed = new HashSet<string>();
-        var failed = new HashSet<string>();
-        Func<string, bool> isCompleted = completed.Contains, isFailed = failed.Contains;
-        Action<string> start = throws.Add, timeout = timeouts.Add;
-        var advance = sequenceType.GetMethod("Advance", Flags);
-        bool Advance(float now) => (bool)advance.Invoke(sequence, new object[] { now, isEquipped, start, timeout, isCompleted, isFailed });
-        Check(!Advance(0) && !Advance(0.01f) && throws.Count == 1 && throws[0] == "helmet",
-            "rapid updates cannot start overlapping inventory throws");
-        equipped.Remove("helmet"); equipped.Remove("glasses");
-        Check(!Advance(0.1f) && throws.Count == 1, "slot removal alone cannot advance an unfinished throw");
-        completed.Add("helmet");
-        Check(!Advance(0.2f) && throws.Count == 2 && throws[1] == "mask",
-            "completed removal advances past missing equipment and rechecks remaining slots");
-        equipped.Remove("mask");
-        completed.Add("mask");
-        Check(Advance(0.3f) && throws.Count == 2 && timeouts.Count == 0, "already removed items are never thrown again");
-        sequence = Activator.CreateInstance(sequenceType, true);
-        ((List<string>)sequenceType.GetField("Items", Flags).GetValue(sequence)).AddRange(new[] { "helmet", "mask" });
-        equipped.Add("helmet"); equipped.Add("mask"); throws.Clear();
-        Check(!Advance(1) && Advance(2) && throws.Count == 1 && timeouts.Count == 1,
-            "stalled EFT inventory removal terminates the sequence without throwing the next item");
-        sequence = Activator.CreateInstance(sequenceType, true);
-        ((List<string>)sequenceType.GetField("Items", Flags).GetValue(sequence)).AddRange(new[] { "helmet", "mask" });
-        throws.Clear(); failed.Add("helmet");
-        Check(!Advance(3) && Advance(3.1f) && throws.Count == 1, "failed operation stops subsequent throws without automatic retry");
     }
 }

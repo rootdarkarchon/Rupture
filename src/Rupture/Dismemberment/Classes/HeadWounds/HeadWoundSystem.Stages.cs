@@ -25,7 +25,7 @@ internal static partial class HeadWoundSystem
 
     private static void WarmHeadResources()
     {
-        if (!_warmResourcesPending || MultiplayerRuntime.Current.IsHeadless || !ProceduralCutFrameBudget.CanRunStage) return;
+        if (!_warmResourcesPending || MultiplayerRuntime.Current.IsHeadless || !FrameWorkBudget.CanRunStage) return;
         long started = Stopwatch.GetTimestamp();
         UnityEngine.Profiling.Profiler.BeginSample(HeadStageMarkers[(int)HeadStage.Resources]);
         try
@@ -38,23 +38,23 @@ internal static partial class HeadWoundSystem
             _warmResourceTicks += ticks;
             _warmResourceMaxTicks = Math.Max(_warmResourceMaxTicks, ticks);
             _warmResourceCalls++;
-            ProceduralCutFrameBudget.RecordStage(ticks);
+            FrameWorkBudget.RecordStage(ticks);
             UnityEngine.Profiling.Profiler.EndSample();
             if (RupturePlugin.Log.IsDebugEnabled && !_warmResourcesPending)
                 RupturePlugin.Log.LogInfo($"RPT head wound resource warmup: totalMainMs={_warmResourceTicks * 1000d / Stopwatch.Frequency:F3}, maxAtomicMainMs={_warmResourceMaxTicks * 1000d / Stopwatch.Frequency:F3}, calls={_warmResourceCalls}.");
-            if (RupturePlugin.Log.IsDebugEnabled && ticks * 1000d / Stopwatch.Frequency > ProceduralCutFrameBudget.BudgetMilliseconds)
-                RupturePlugin.Log.LogInfo($"RPT head wound resource warmup overrun: atomicMainMs={ticks * 1000d / Stopwatch.Frequency:F3}, budgetMs={ProceduralCutFrameBudget.BudgetMilliseconds:F3}.");
+            if (RupturePlugin.Log.IsDebugEnabled && ticks * 1000d / Stopwatch.Frequency > FrameWorkBudget.BudgetMilliseconds)
+                RupturePlugin.Log.LogInfo($"RPT head wound resource warmup overrun: atomicMainMs={ticks * 1000d / Stopwatch.Frequency:F3}, budgetMs={FrameWorkBudget.BudgetMilliseconds:F3}.");
         }
     }
 
     private static ApplyResult AdvanceHeadStages(WoundWorkItem work, string key, out string failure)
     {
         failure = null;
-        if (!ProceduralCutFrameBudget.CanRunStage) return ApplyResult.Waiting;
+        if (!FrameWorkBudget.CanRunStage) return ApplyResult.Waiting;
         if (work.Build == null) work.Build = new HeadBuild { State = work.State, Revision = work.State.Revision };
         HeadBuild build = work.Build;
         build.YieldFrame = false;
-        while (ProceduralCutFrameBudget.CanRunStage)
+        while (FrameWorkBudget.CanRunStage)
         {
             HeadStage stage = build.Stage;
             int progress = build.CaptureIndex + build.AcquisitionPart + build.UploadPart;
@@ -67,14 +67,14 @@ internal static partial class HeadWoundSystem
             finally
             {
                 long ticks = Stopwatch.GetTimestamp() - started;
-                ProceduralCutFrameBudget.RecordStage(ticks);
+                FrameWorkBudget.RecordStage(ticks);
                 work.StageTicks[(int)stage] += ticks;
                 work.StageMaxTicks[(int)stage] = Math.Max(work.StageMaxTicks[(int)stage], ticks);
                 work.StageCalls[(int)stage]++;
                 if (stage >= HeadStage.Select && stage <= HeadStage.Enqueue) build.CaptureMilliseconds += ticks * 1000d / Stopwatch.Frequency;
                 UnityEngine.Profiling.Profiler.EndSample();
-                if (RupturePlugin.Log.IsDebugEnabled && ticks * 1000d / Stopwatch.Frequency > ProceduralCutFrameBudget.BudgetMilliseconds)
-                    RupturePlugin.Log.LogInfo($"RPT head wound budget overrun: stage={stage}, atomicMainMs={ticks * 1000d / Stopwatch.Frequency:F3}, budgetMs={ProceduralCutFrameBudget.BudgetMilliseconds:F3}.");
+                if (RupturePlugin.Log.IsDebugEnabled && ticks * 1000d / Stopwatch.Frequency > FrameWorkBudget.BudgetMilliseconds)
+                    RupturePlugin.Log.LogInfo($"RPT head wound budget overrun: stage={stage}, atomicMainMs={ticks * 1000d / Stopwatch.Frequency:F3}, budgetMs={FrameWorkBudget.BudgetMilliseconds:F3}.");
             }
             if (result != ApplyResult.Waiting || work.Build == null || build.YieldFrame ||
                 build.Stage == stage && progress == build.CaptureIndex + build.AcquisitionPart + build.UploadPart) return result;

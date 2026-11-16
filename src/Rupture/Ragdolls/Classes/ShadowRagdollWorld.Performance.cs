@@ -11,7 +11,7 @@ internal static partial class ShadowRagdollWorld
 	internal enum MainThreadStage
 	{
 		UpdateSetup, ImpactNetwork, ImpactState, ShotImpacts, Headgear, HeadWounds,
-		Blood, FracturesUpdate, Coordinator, ShadowUpdate, LimbCuts, PhysicsDiagnostics, UpdateCleanup,
+		Blood, FracturesUpdate, Coordinator, ShadowUpdate, LimbCuts, PhysicsDiagnostics, EnvironmentPrefetch, UpdateCleanup,
 		LatePhysics, VisibleShell, FracturesLate,
 		AuthorityPlayback, CasingsPrepare, PoseSync, SleepAndWeaponState, PoseSnapshots,
 		BloodTracking, BloodLivingStreams, BloodPreparation, BloodEmitters, ClothingSoak, BloodDecals, BloodMesh,
@@ -20,8 +20,10 @@ internal static partial class ShadowRagdollWorld
 		SoakTextureRegistration, SoakColorMapping, SoakMeshUpload, SoakRenderTargets, SoakDrawSubmit, SoakCompositeSubmit, SoakCommandSubmit, SoakRenderTargetRelease,
 		CasingReceiveAndRetire, CasingExposureRelease, CasingListenerAndCapacity, CasingAdmission, CasingMovingCoverage,
 		CasingImpactSelection, CasingImpactExposure, CasingImpactCoverage, CasingQueueSubmit, CasingPosePublish, CasingAudio,
-		CasingAudioSelection, CasingAudioSurface, CasingAudioPlayback, CasingCoverageRefresh,
+		CasingAudioSelection, CasingAudioSurface, CasingAudioPlayback, CasingAudioPick, CasingAudioBorrow, CasingAudioConfigure, CasingAudioStart,
+		CasingAudioOcclusion, CasingAudioQueue, CasingCoverageRefresh,
 		BloodDecalEmit, BloodDecalUpload, BloodMeshBuild, BloodMeshUpload, BloodParcelSubmit, BloodHistory, BloodClothingSupply, BloodFlow, BloodImpactPrediction,
+		ShotHeadWound, ShotResolve, ShotPrepare, ShotPrepareState, ShotPrepareWake, ShotPrepareNeighbors, ShotPrepareReactivate, ShotPrepareNetwork, ShotImpulse, ShotLog,
 		Count
 	}
 
@@ -78,6 +80,41 @@ internal static partial class ShadowRagdollWorld
 		return names;
 	}
 
+	private static int _frameWorstFrame = -1;
+	private static MainThreadStage _frameWorstStage;
+	private static double _frameWorstMilliseconds;
+
+	/// <summary>Keeps the slowest traced stage of the current frame. Runs only while tracing is active, so the frame-count read is off the idle path.</summary>
+	private static void RecordFrameStage(MainThreadStage stage, double milliseconds)
+	{
+		int frame = UnityEngine.Time.frameCount;
+		if (frame != _frameWorstFrame)
+		{
+			_frameWorstFrame = frame;
+			_frameWorstStage = stage;
+			_frameWorstMilliseconds = milliseconds;
+			return;
+		}
+
+		if (milliseconds <= _frameWorstMilliseconds) return;
+		_frameWorstStage = stage;
+		_frameWorstMilliseconds = milliseconds;
+	}
+
+	/// <summary>Reports the slowest traced main-thread stage of the current frame; zero when nothing was traced this frame.</summary>
+	internal static void GetFrameWorstStage(out MainThreadStage stage, out double milliseconds)
+	{
+		if (_frameWorstFrame != UnityEngine.Time.frameCount)
+		{
+			stage = default;
+			milliseconds = 0d;
+			return;
+		}
+
+		stage = _frameWorstStage;
+		milliseconds = _frameWorstMilliseconds;
+	}
+
 	// Struct scopes avoid delegates/boxing and retain exception-safe profiler pairing.
 	// Names and sample buffers are allocated once; disabled tracing does no timing work.
 	internal readonly struct MainThreadTrace : IDisposable
@@ -98,7 +135,11 @@ internal static partial class ShadowRagdollWorld
 			try
 			{
 				if (_generation == _mainThreadTimingGeneration)
-					MainThreadStageTimings[(int)_stage].RecordElapsed(_started);
+				{
+					double milliseconds = (Stopwatch.GetTimestamp() - _started) * 1000d / Stopwatch.Frequency;
+					MainThreadStageTimings[(int)_stage].Record(milliseconds);
+					RecordFrameStage(_stage, milliseconds);
+				}
 			}
 			finally { UnityEngine.Profiling.Profiler.EndSample(); }
 		}
@@ -110,6 +151,8 @@ internal static partial class ShadowRagdollWorld
 	private static void ResetMainThreadStageTimings()
 	{
 		_mainThreadTimingGeneration++;
+		_frameWorstFrame = -1;
+		_frameWorstMilliseconds = 0d;
 		foreach (TimingMetric metric in MainThreadStageTimings) metric.Reset();
 		Array.Clear(MainThreadWorkCounts, 0, MainThreadWorkCounts.Length);
 	}
@@ -147,7 +190,8 @@ internal static partial class ShadowRagdollWorld
 		LogStageRange("Casing detail", MainThreadStage.CasingAudioSelection, MainThreadStage.CasingCoverageRefresh);
 		LogStageRange("Blood rendering detail", MainThreadStage.BloodDecalEmit, MainThreadStage.BloodParcelSubmit);
 		LogStageRange("Blood emitter detail", MainThreadStage.BloodHistory, MainThreadStage.BloodImpactPrediction);
-		var work = new StringBuilder("RPT main thread work: traceSchema=12; optimization=coarse-soaking-sleep-aware-physics-4hz-roots; diagnosticFormatting=worker; countsSinceReset; updateFrames=");
+		LogStageRange("ShotImpacts children", MainThreadStage.ShotHeadWound, MainThreadStage.ShotLog);
+		var work = new StringBuilder("RPT main thread work: traceSchema=13; optimization=coarse-soaking-sleep-aware-physics-4hz-roots; diagnosticFormatting=worker; countsSinceReset; updateFrames=");
 		work.Append(Report.Frames);
 		for (int index = 0; index < Report.Work.Length; index++)
 			work.Append(", ").Append(MainThreadWorkNames[index]).Append('=').Append(Report.Work[index]);

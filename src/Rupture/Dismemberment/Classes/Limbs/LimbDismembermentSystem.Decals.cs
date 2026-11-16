@@ -72,6 +72,9 @@ internal static partial class LimbDismembermentSystem
 		const float ProjectionStartOffset = 0.006f;
 		const int MaximumVisibilityWaitFrames = 120;
 		const int MaximumAuditQueueDrainFrames = 30;
+		const int MaximumSubmissionsPerSide = 10;
+		const int MaximumSubmissionsPerFrame = 4;
+		const int MaximumBodyDeferredFrames = 30;
 		// Static gibs still require native renderer visibility. Body skins can
 		// receive paint while culled through BodyDecalLodPatch's posed mesh draw.
 		yield return null;
@@ -79,13 +82,15 @@ internal static partial class LimbDismembermentSystem
 			if (RuptureConfiguration.EnableBloodEffects?.Value != true || !Singleton<Effects>.Instantiated ||
 				Singleton<Effects>.Instance == null)
 			{
-				RupturePlugin.Log.LogInfo("RPT limb sever native blood ring skipped: blood effects or EFT Effects singleton unavailable.");
+				if (RupturePlugin.Log.IsDebugEnabled)
+					RupturePlugin.Log.LogInfo("RPT limb sever native blood ring skipped: blood effects or EFT Effects singleton unavailable.");
 				yield break;
 			}
 			Effects effects = Singleton<Effects>.Instance;
 			if (!effects.UseDecalPainter || effects.TexDecals == null)
 			{
-				RupturePlugin.Log.LogInfo("RPT limb sever native blood ring skipped: EFT texture decal painter is disabled or unavailable.");
+				if (RupturePlugin.Log.IsDebugEnabled)
+					RupturePlugin.Log.LogInfo("RPT limb sever native blood ring skipped: EFT texture decal painter is disabled or unavailable.");
 				yield break;
 			}
 			PreparedRenderer bodySampleSource = prepared
@@ -106,61 +111,96 @@ internal static partial class LimbDismembermentSystem
 				queueBeforeSubmit = LimbDecalDiagnostics.CaptureQueue(observedRenderers);
 			bool bodyComplete = bodySampleSource == null || bodyTargets.Count == 0;
 			bool gibComplete = gibSampleSource == null || gibTargets.Count == 0;
+			bool bodyStarted = false;
+			bool visibilityExpired = false;
+			int bodyNext = 0;
+			int waitFrames = 0;
+			int bodyDeferredFrames = 0;
 
-			for (int frame = 0; frame < MaximumVisibilityWaitFrames && (!bodyComplete || !gibComplete); frame++)
+			// Visibility is awaited for at most MaximumVisibilityWaitFrames frames. Static gibs stop
+			// accepting paint once culled, so a gib submits every sample in the frame its eligibility
+			// check passes. Body skins paint while culled, so once eligible their submissions are
+			// rationed across deferrable frames and never time out.
+			while (!bodyComplete || !gibComplete)
 			{
-				if (!bodyComplete)
+				if (!bodyComplete && !bodyStarted && !visibilityExpired)
 				{
 					bodyEligible = CountEligibleNativeDecalRenderers(bodyTargets);
-					if (bodyEligible > 0)
+					bodyStarted = bodyEligible > 0;
+				}
+
+				if (bodyStarted && !bodyComplete)
+				{
+					// A body that keeps meeting busy frames still finishes after MaximumBodyDeferredFrames.
+					if (FrameWorkBudget.CanRunDeferrableStage || ++bodyDeferredFrames > MaximumBodyDeferredFrames)
 					{
-						foreach (ProceduralLimbWoundGeometry.DecalSample sample in bodySampleSource.BodyDecalSamples)
+						int remaining = MaximumSubmissionsPerFrame;
+						ProceduralLimbWoundGeometry.DecalSample[] bodySamples = bodySampleSource.BodyDecalSamples;
+						while (remaining > 0 && bodyNext < bodySamples.Length && bodySubmitted < MaximumSubmissionsPerSide &&
+							bodySampleSource.BodyRenderer != null)
 						{
-							if (bodySubmitted >= 10) break;
-							if (!TrySkinSample(bodySampleSource.BodyRenderer, sample,
+							if (!TrySkinSample(bodySampleSource.BodyRenderer, bodySamples[bodyNext++],
 								out Vector3 point, out Vector3 normal)) continue;
 							effects.PlayerMeshesHit(bodyTargets,
 								point + normal * ProjectionStartOffset, -normal);
 							bodySubmitted++;
+							remaining--;
 						}
-						if (auditEnabled)
-							bodyQueueAfterSubmit = LimbDecalDiagnostics.CaptureQueue(observedRenderers);
-						bodyComplete = true;
+						if (bodyNext >= bodySamples.Length || bodySubmitted >= MaximumSubmissionsPerSide ||
+							bodySampleSource.BodyRenderer == null)
+						{
+							if (auditEnabled)
+								bodyQueueAfterSubmit = LimbDecalDiagnostics.CaptureQueue(observedRenderers);
+							bodyComplete = true;
+						}
 					}
 				}
 
-				if (!gibComplete)
+				if (!gibComplete && !visibilityExpired)
 				{
 					RetryMissingGibDecalTransfers(prepared);
 					gibEligible = CountEligibleNativeDecalRenderers(gibTargets);
 					if (gibEligible > 0)
 					{
-						Transform gibTransform = gibSampleSource.GibRenderer.transform;
-						foreach (LocalDecalSample sample in gibSampleSource.GibLocalDecalSamples)
+						if (gibSampleSource.GibRenderer != null)
 						{
-							if (gibSubmitted >= 10) break;
-							Vector3 normal = gibTransform.TransformDirection(sample.Normal).normalized;
-							Vector3 point = gibTransform.TransformPoint(sample.Point);
-							if (!IsFinite(point) || !IsFinite(normal)) continue;
-							effects.PlayerMeshesHit(gibTargets,
-								point + normal * ProjectionStartOffset, -normal);
-							gibSubmitted++;
+							Transform gibTransform = gibSampleSource.GibRenderer.transform;
+							List<LocalDecalSample> gibSamples = gibSampleSource.GibLocalDecalSamples;
+							for (int gibNext = 0; gibNext < gibSamples.Count && gibSubmitted < MaximumSubmissionsPerSide; gibNext++)
+							{
+								LocalDecalSample sample = gibSamples[gibNext];
+								Vector3 normal = gibTransform.TransformDirection(sample.Normal).normalized;
+								Vector3 point = gibTransform.TransformPoint(sample.Point);
+								if (!IsFinite(point) || !IsFinite(normal)) continue;
+								effects.PlayerMeshesHit(gibTargets,
+									point + normal * ProjectionStartOffset, -normal);
+								gibSubmitted++;
+							}
 						}
 						if (auditEnabled)
 							gibQueueAfterSubmit = LimbDecalDiagnostics.CaptureQueue(observedRenderers);
 						gibComplete = true;
 					}
 				}
-				if (!bodyComplete || !gibComplete) yield return null;
+
+				if (bodyComplete && gibComplete) break;
+				bool waitingForVisibility = !bodyComplete && !bodyStarted || !gibComplete;
+				if (waitingForVisibility && ++waitFrames >= MaximumVisibilityWaitFrames) visibilityExpired = true;
+				if (visibilityExpired && !(bodyStarted && !bodyComplete)) break;
+				yield return null;
 			}
 
-			int inheritedGibTextures = prepared.Count(item => item != null &&
-				(item.GibDecalTransfer == LimbDecalTransferResult.Copied ||
-				 item.GibDecalTransfer == LimbDecalTransferResult.AlreadyRegistered));
-			RupturePlugin.Log.LogInfo($"RPT limb sever native blood ring: bodySubmissions={bodySubmitted}, gibSubmissions={gibSubmitted}, " +
-				$"bodyEligible={bodyEligible}, gibEligible={gibEligible}, bodyLodTargets={bodyRenderers.Length}, " +
-				$"gibTargets={gibRenderers.Length}, nativeBodyGroups={usedNativeBodyGroups}, " +
-				$"inheritedGibTextures={inheritedGibTextures}, visibilityTimedOut={!bodyComplete || !gibComplete}, perSideCap=10.");
+			if (RupturePlugin.Log.IsDebugEnabled)
+			{
+				int inheritedGibTextures = prepared.Count(item => item != null &&
+					(item.GibDecalTransfer == LimbDecalTransferResult.Copied ||
+					 item.GibDecalTransfer == LimbDecalTransferResult.AlreadyRegistered));
+				RupturePlugin.Log.LogInfo($"RPT limb sever native blood ring: bodySubmissions={bodySubmitted}, gibSubmissions={gibSubmitted}, " +
+					$"bodyEligible={bodyEligible}, gibEligible={gibEligible}, bodyLodTargets={bodyRenderers.Length}, " +
+					$"gibTargets={gibRenderers.Length}, nativeBodyGroups={usedNativeBodyGroups}, " +
+					$"inheritedGibTextures={inheritedGibTextures}, visibilityTimedOut={!bodyComplete || !gibComplete}, " +
+					$"perSideCap={MaximumSubmissionsPerSide}, perFrameCap={MaximumSubmissionsPerFrame}.");
+			}
 
 			if (auditEnabled)
 			{

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using Comfort.Common;
 using EFT;
+using Diz.Skinning;
 using EFT.HealthSystem;
 using Rupture.Dismemberment.Classes.BloodStreams;
 using Rupture.Dismemberment.Classes.Limbs;
@@ -21,6 +22,49 @@ internal static class FractureSystem
         internal bool Dirty = true;
         internal float NextCheck;
         internal int Seen;
+        private readonly Dictionary<SkinnedMeshRenderer, KeyEntry> Keys = new Dictionary<SkinnedMeshRenderer, KeyEntry>();
+        // The cached key encodes every ancestor's sibling index and name, so it is reused only while the whole ancestor
+        // chain still has the same transforms at the same sibling indices; a rename alone is not tracked.
+        private sealed class KeyEntry
+        {
+            internal readonly string Key;
+            private readonly Transform[] _chain;
+            private readonly int[] _indices;
+
+            internal KeyEntry(Transform transform, string key)
+            {
+                Key = key;
+                int depth = 0;
+                for (Transform current = transform; current != null; current = current.parent) depth++;
+                _chain = new Transform[depth];
+                _indices = new int[depth];
+                int index = 0;
+                for (Transform current = transform; current != null; current = current.parent, index++)
+                {
+                    _chain[index] = current;
+                    _indices[index] = current.GetSiblingIndex();
+                }
+            }
+
+            internal bool Matches(Transform transform)
+            {
+                int index = 0;
+                for (Transform current = transform; current != null; current = current.parent, index++)
+                    if (index >= _chain.Length || _chain[index] != current || _indices[index] != current.GetSiblingIndex()) return false;
+                return index == _chain.Length;
+            }
+        }
+
+        // Shared across the actor's slots instead of rebuilding the string per slot.
+        internal string KeyFor(SkinnedMeshRenderer renderer)
+        {
+            Transform transform = renderer.transform;
+            if (Keys.TryGetValue(renderer, out KeyEntry entry) && entry.Matches(transform)) return entry.Key;
+            if (Keys.Count > 64) Keys.Clear();
+            string key = HierarchyKey(transform);
+            Keys[renderer] = new KeyEntry(transform, key);
+            return key;
+        }
         internal Actor(Player player)
         {
             Player = player; Health = player.HealthController;
@@ -43,6 +87,7 @@ internal static class FractureSystem
         {
             Health.EffectAddedEvent -= Changed; Health.EffectStartedEvent -= Changed;
             Health.EffectUpdatedEvent -= Changed; Health.EffectResidualEvent -= Changed; Health.EffectRemovedEvent -= Changed;
+            Keys.Clear();
             for (int i = 0; i < Slots.Length; i++) { Slots[i]?.Dispose(); Slots[i] = null; }
         }
     }
@@ -54,6 +99,7 @@ internal static class FractureSystem
         internal LODGroup Group;
         internal Transform SkinRoot, Parent;
         internal int Level, View;
+        internal bool HasGroup;
         internal string Key, Failure;
         internal readonly FractureSurface[] Surfaces = new FractureSurface[2];
     }
@@ -66,7 +112,7 @@ internal static class FractureSystem
         internal readonly List<Representation> Representations = new List<Representation>();
         private readonly List<Candidate> _candidates = new List<Candidate>();
         private readonly List<SkinnedMeshRenderer> _scratch = new List<SkinnedMeshRenderer>();
-        private float _refresh;
+        private float _refresh, _groupCheck;
         private readonly uint[] _bloodIds = new uint[2];
         private readonly float[] _bloodRetries = new float[2];
         private readonly FractureVisual[] _bloodWounds = new FractureVisual[2];
@@ -81,11 +127,22 @@ internal static class FractureSystem
             if (now < _refresh) return;
             _refresh = now + 0.5f;
             var body = Actor.Player.PlayerBody;
-            if (body?.BodySkins == null || !LimbDismembermentSystem.TryGetLimbSegment(Actor.Player, Part, Appearance.Level,
-                out Transform root, out Transform end)) { Clear(); Warn("fracture skeleton or clothing not ready"); return; }
+            if (body?.BodySkins == null) { Clear(); Warn("fracture skeleton or clothing not ready"); return; }
+            // The limb segment depends only on the skeleton: resolve it (frame allocation, bone search, name reads)
+            // once and again only if a bone was destroyed.
+            Transform root = _root, end = _end;
+            if (root == null || end == null)
+            {
+                if (!LimbDismembermentSystem.TryGetLimbSegment(Actor.Player, Part, Appearance.Level, out root, out end))
+                { Clear(); Warn("fracture skeleton or clothing not ready"); return; }
+                RootName = root.name; EndName = end.name;
+            }
             bool changed = _root != root || _end != end;
             _root = root; _end = end;
-            RootName = root.name; EndName = end.name;
+            // Ancestor LOD groups practically never change; the cheap identity checks catch every reparent, and the
+            // full group lookup is repeated on a slow cadence only.
+            bool recheckGroups = now >= _groupCheck;
+            if (recheckGroups) _groupCheck = now + 5f;
             _scratch.Clear();
             EBodyModelPart model = Appearance.IsLeg ? EBodyModelPart.Feet : EBodyModelPart.Body;
             Gather(model);
@@ -96,7 +153,8 @@ internal static class FractureSystem
                 if (_candidates[i].Renderer != _scratch[i] || _scratch[i] == null ||
                     _candidates[i].Mesh != _scratch[i].sharedMesh || _candidates[i].SkinRoot != _scratch[i].rootBone ||
                     _candidates[i].Parent != _scratch[i].transform.parent ||
-                    _candidates[i].Group != _scratch[i].GetComponentInParent<LODGroup>()) { changed = true; break; }
+                    (_candidates[i].HasGroup && _candidates[i].Group == null) ||
+                    (recheckGroups && _candidates[i].Group != _scratch[i].GetComponentInParent<LODGroup>())) { changed = true; break; }
             if (!changed) return;
             Clear();
             if (_scratch.Count > 64) { Warn("fracture representation exceeds 64 source renderers"); return; }
@@ -112,7 +170,7 @@ internal static class FractureSystem
                 }
                 var candidate = new Candidate { Renderer = renderer, Mesh = renderer.sharedMesh, Group = group,
                     SkinRoot = renderer.rootBone, Parent = renderer.transform.parent,
-                    Level = level, View = i < bodyCount ? 0 : 1, Key = HierarchyKey(renderer.transform) };
+                    Level = level, View = i < bodyCount ? 0 : 1, HasGroup = group != null, Key = Actor.KeyFor(renderer) };
                 _candidates.Add(candidate);
                 for (int site = 0; site < Appearance.SiteCount; site++)
                 {
@@ -137,8 +195,14 @@ internal static class FractureSystem
             void Gather(EBodyModelPart part)
             {
                 if (!body.BodySkins.TryGetValue(part, out var garment) || garment == null) return;
-                foreach (Renderer candidate in garment.GetRenderers())
-                    if (candidate is SkinnedMeshRenderer skin && !_scratch.Contains(skin)) _scratch.Add(skin);
+                AbstractSkin[] lods = garment._lods;
+                if (lods == null) return;
+                // Walk the LOD skins directly: LoddedSkin.GetRenderers() allocates a LINQ iterator per call.
+                for (int skinIndex = 0; skinIndex < lods.Length; skinIndex++)
+                {
+                    SkinnedMeshRenderer skin = lods[skinIndex] != null ? lods[skinIndex].SkinnedMeshRenderer : null;
+                    if (skin != null && !_scratch.Contains(skin)) _scratch.Add(skin);
+                }
             }
         }
         internal void Present(float now)
@@ -336,7 +400,7 @@ internal static class FractureSystem
     { foreach (var actor in Actors) actor.Dispose(); Actors.Clear(); Pending.Clear(); Sources.Clear(); Warnings.Clear(); _nextScan = 0; _scan = 0; }
     private static void Warn(string message)
     { if (Warnings.Count < 64 && Warnings.Add(message)) RupturePlugin.Log.LogWarning("RPT " + message); }
-    private static string HierarchyKey(Transform transform)
+    internal static string HierarchyKey(Transform transform)
     {
         string key = string.Empty;
         for (Transform current = transform; current != null; current = current.parent)

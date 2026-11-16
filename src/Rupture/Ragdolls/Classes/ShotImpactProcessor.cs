@@ -12,6 +12,7 @@ namespace Rupture.Ragdolls.Classes;
 internal static class ShotImpactProcessor
 {
 	private const float PendingShotLifetimeSeconds = 30f;
+	private const float MaximumShotDeferralSeconds = 1f;
 
 	private struct PendingShot
 	{
@@ -25,9 +26,17 @@ internal static class ShotImpactProcessor
 		internal Item BirthAmmo;
 		internal int BirthFireIndex, BirthFragmentIndex, BirthSeed;
 		internal bool HeadWoundCompleted;
+		/// <summary>Realtime of the first time this shot waited for a parked body's environment capture; zero while it has not waited.</summary>
+		internal float DeferredSince;
 	}
 
 	private static readonly List<PendingShot> PendingShots = new List<PendingShot>(64);
+	/// <summary>
+	/// Finished shots that hit a parked body and wait for the geometry it needs (<see cref="ProcessCompletedShot"/>). They no longer
+	/// fly, so they live apart from <see cref="PendingShots"/>: a pooled <see cref="EFT.Ballistics.Shot"/> that EFT reuses for a new
+	/// projectile can neither feed its flight into them nor make <see cref="TryGetTrackedContact"/> ambiguous for the new shot.
+	/// </summary>
+	private static readonly List<PendingShot> DeferredShots = new List<PendingShot>(8);
 	private static uint _nextInstance;
 
 	internal static void Track(EFT.Ballistics.Shot shot)
@@ -87,6 +96,7 @@ internal static class ShotImpactProcessor
 	internal static void Update()
 	{
 		float now = Time.realtimeSinceStartup;
+		RetryDeferredShots(now);
 		for (int index = PendingShots.Count - 1; index >= 0; index--)
 		{
 			PendingShot pending = PendingShots[index];
@@ -97,7 +107,7 @@ internal static class ShotImpactProcessor
 			}
 
 			CaptureFlightState(ref pending);
-			TryCompleteHeadWound(ref pending);
+			using (ShadowRagdollWorld.TraceMainThread(ShadowRagdollWorld.MainThreadStage.ShotHeadWound)) TryCompleteHeadWound(ref pending);
 			if (!pending.Shot.IsShotFinished)
 			{
 				PendingShots[index] = pending;
@@ -105,13 +115,36 @@ internal static class ShotImpactProcessor
 			}
 
 			PendingShots.RemoveAt(index);
-			ProcessCompletedShot(pending);
+			// A shot that hit a parked body waits, apart from the flying shots, for the geometry that body needs before it may move.
+			if (ProcessCompletedShot(ref pending)) DeferredShots.Add(pending);
+		}
+	}
+
+	/// <summary>
+	/// Retries the finished shots that wait for a parked body. A deferred shot never samples flight, completes a head wound or checks
+	/// <c>IsShotFinished</c> again: the <see cref="EFT.Ballistics.Shot"/> may be a pooled object that now describes another projectile,
+	/// which is dropped as soon as its birth fingerprint no longer matches.
+	/// </summary>
+	private static void RetryDeferredShots(float now)
+	{
+		for (int index = DeferredShots.Count - 1; index >= 0; index--)
+		{
+			PendingShot pending = DeferredShots[index];
+			if (pending.Shot == null || pending.ExpiresAt <= now || !SameLifetime(pending))
+			{
+				DeferredShots.RemoveAt(index);
+				continue;
+			}
+
+			if (ProcessCompletedShot(ref pending)) DeferredShots[index] = pending;
+			else DeferredShots.RemoveAt(index);
 		}
 	}
 
 	internal static void Reset()
 	{
 		PendingShots.Clear();
+		DeferredShots.Clear();
 	}
 
 	internal static void TryCompleteLethalHeadshotNow()
@@ -154,53 +187,97 @@ internal static class ShotImpactProcessor
 		}
 	}
 
-	private static void ProcessCompletedShot(PendingShot pending)
+	/// <summary>
+	/// Applies a finished shot to what it hit. True when the shot has to wait: its target is parked (a settled corpse, its weapon or a
+	/// detached gib) and the geometry it needs before it may move is still being captured. The shot is kept in <see cref="DeferredShots"/>
+	/// and its impulse is applied once the body is awake; the wait is bounded by the world's wake wait.
+	/// </summary>
+	private static bool ProcessCompletedShot(ref PendingShot pending)
 	{
 		EFT.Ballistics.Shot shot = pending.Shot;
 		Collider hitCollider = shot?.HitCollider;
 		if (hitCollider == null || !(shot.Ammo is EFT.InventoryLogic.Ammo ammo))
 		{
-			return;
+			return false;
 		}
 		// Complete the lethal descriptor with retained impact velocity, mass,
 		// diameter and final collider before processing post-mortem interactions.
 		if (!pending.HeadWoundCompleted)
 		{
-			HeadWoundSystem.TryCompleteLethalHeadshot(shot, pending.BulletMassGram,
-				pending.VelocityMagnitude, pending.Direction);
+			using (ShadowRagdollWorld.TraceMainThread(ShadowRagdollWorld.MainThreadStage.ShotHeadWound))
+			{
+				pending.HeadWoundCompleted = HeadWoundSystem.TryCompleteLethalHeadshot(shot, pending.BulletMassGram,
+					pending.VelocityMagnitude, pending.Direction);
+			}
 		}
 		float projectileImpulseMagnitude = PhysicsMath.CalculateProjectileImpulse(
 			pending.BulletMassGram, pending.VelocityMagnitude, RuptureConfiguration.ShotIntensity.Value);
-		if (projectileImpulseMagnitude > 0f && pending.Direction.sqrMagnitude > 0.0001f &&
-			ShadowRagdollWorld.TryApplyLocalDetachedGibPointImpulse(hitCollider,
-				pending.Direction * projectileImpulseMagnitude, shot.HitPoint, out string localGibBody))
+		float now = Time.realtimeSinceStartup;
+		string localGibBody = null;
+		bool localGibApplied = false;
+		bool awaitingGibEnvironment = false;
+		using (ShadowRagdollWorld.TraceMainThread(ShadowRagdollWorld.MainThreadStage.ShotImpulse))
 		{
-			RupturePlugin.Log.LogInfo($"RPT local gib bullet impulse: applied=True, body={localGibBody ?? "unresolved"}, " +
-				$"impulse={projectileImpulseMagnitude:F2}, speed={pending.VelocityMagnitude:F1}, " +
-				$"massGrams={pending.BulletMassGram:F2}, caliber={ammo.Caliber ?? "unknown"}.");
-			return;
+			localGibApplied = projectileImpulseMagnitude > 0f && pending.Direction.sqrMagnitude > 0.0001f &&
+				ShadowRagdollWorld.TryApplyLocalDetachedGibPointImpulse(hitCollider,
+					pending.Direction * projectileImpulseMagnitude, shot.HitPoint, out localGibBody, out awaitingGibEnvironment);
+		}
+		if (localGibApplied)
+		{
+			if (RupturePlugin.Log.IsDebugEnabled)
+			{
+				using (ShadowRagdollWorld.TraceMainThread(ShadowRagdollWorld.MainThreadStage.ShotLog))
+				{
+					RupturePlugin.Log.LogInfo($"RPT local gib bullet impulse: applied=True, body={localGibBody ?? "unresolved"}, " +
+						$"impulse={projectileImpulseMagnitude:F2}, speed={pending.VelocityMagnitude:F1}, " +
+						$"massGrams={pending.BulletMassGram:F2}, caliber={ammo.Caliber ?? "unknown"}.");
+				}
+			}
+			return false;
+		}
+		if (awaitingGibEnvironment && ShouldDefer(ref pending, now))
+		{
+			return true;
 		}
 
-		Corpse corpse = hitCollider.GetComponentInParent<Corpse>();
-		if (corpse == null)
+		Corpse corpse;
+		bool independentWeaponHit;
+		using (ShadowRagdollWorld.TraceMainThread(ShadowRagdollWorld.MainThreadStage.ShotResolve))
 		{
-			ShadowRagdollWorld.TryResolveHitCorpse(hitCollider, out corpse);
+			corpse = hitCollider.GetComponentInParent<Corpse>();
+			if (corpse == null)
+			{
+				ShadowRagdollWorld.TryResolveHitCorpse(hitCollider, out corpse);
+			}
+			independentWeaponHit = corpse != null && ShadowRagdollWorld.IsIndependentWeaponHit(corpse, hitCollider);
 		}
-		bool independentWeaponHit = corpse != null && ShadowRagdollWorld.IsIndependentWeaponHit(corpse, hitCollider);
+		if (corpse != null && ShadowRagdollWorld.IsAwaitingImpactWake(corpse, independentWeaponHit) && ShouldDefer(ref pending, now))
+		{
+			return true;
+		}
 		CorpseInteractionTarget interactionTarget = default;
 		bool postMortemImpact = false;
 		if (corpse != null && !independentWeaponHit)
 		{
-			RagdollCoordinator.PrepareCorpseImpact(corpse, explosion: false, awakenedStates: null, out interactionTarget, out postMortemImpact);
+			using (ShadowRagdollWorld.TraceMainThread(ShadowRagdollWorld.MainThreadStage.ShotPrepare))
+			{
+				RagdollCoordinator.PrepareCorpseImpact(corpse, explosion: false, awakenedStates: null, out interactionTarget, out postMortemImpact);
+			}
 		}
 		EBodyPart resolvedBodyPart = default;
 		Collider canonicalCollider = null;
-		bool bodyPartResolved = !independentWeaponHit && RagdollCoordinator.TryResolveCorpseBodyPart(interactionTarget, hitCollider,
-			out resolvedBodyPart, out canonicalCollider);
+		bool bodyPartResolved;
+		Rigidbody rigidbody;
+		using (ShadowRagdollWorld.TraceMainThread(ShadowRagdollWorld.MainThreadStage.ShotResolve))
+		{
+			bodyPartResolved = !independentWeaponHit && RagdollCoordinator.TryResolveCorpseBodyPart(interactionTarget, hitCollider,
+				out resolvedBodyPart, out canonicalCollider);
+			Collider physicsCollider = canonicalCollider ?? hitCollider;
+			rigidbody = corpse != null && ShadowRagdollWorld.TryResolveHitBody(corpse, physicsCollider, out Rigidbody resolvedBody)
+				? resolvedBody
+				: physicsCollider.attachedRigidbody;
+		}
 		Collider physicsHitCollider = canonicalCollider ?? hitCollider;
-		Rigidbody rigidbody = corpse != null && ShadowRagdollWorld.TryResolveHitBody(corpse, physicsHitCollider, out Rigidbody resolvedBody)
-			? resolvedBody
-			: physicsHitCollider.attachedRigidbody;
 		string resolvedBodyName = rigidbody?.name;
 		float appliedImpulseMagnitude = 0f;
 		bool impulseApplied = false;
@@ -217,32 +294,49 @@ internal static class ShotImpactProcessor
 				Vector3 impulse = pending.Direction * impulseMagnitude;
 				appliedImpulseMagnitude = impulseMagnitude;
 				bool handled = false;
-				LethalImpulseExperiment.Record lethal = independentWeaponHit ? null : LethalImpulseExperiment.CompletedShot(
-					shot, LethalImpulseExperiment.Enabled && SameLifetime(pending) ? pending.Instance : 0, corpse, hitCollider, rigidbody, pending.Projectile,
-					impulse, shot.HitPoint, pending.BulletMassGram, pending.VelocityMagnitude, RuptureConfiguration.ShotIntensity.Value, out handled);
-				if (!handled)
+				using (ShadowRagdollWorld.TraceMainThread(ShadowRagdollWorld.MainThreadStage.ShotImpulse))
 				{
-					impulseApplied = independentWeaponHit
-						? RagdollCoordinator.TryApplyIndependentWeaponPointImpulse(corpse, hitCollider, impulse, shot.HitPoint, out resolvedBodyName)
-						: corpse != null && RagdollCoordinator.TryApplyCorpsePointImpulse(
-							corpse, physicsHitCollider, impulse, shot.HitPoint, out resolvedBodyName);
-					if (!impulseApplied && rigidbody != null)
+					LethalImpulseExperiment.Record lethal = independentWeaponHit ? null : LethalImpulseExperiment.CompletedShot(
+						shot, LethalImpulseExperiment.Enabled && SameLifetime(pending) ? pending.Instance : 0, corpse, hitCollider, rigidbody, pending.Projectile,
+						impulse, shot.HitPoint, pending.BulletMassGram, pending.VelocityMagnitude, RuptureConfiguration.ShotIntensity.Value, out handled);
+					if (!handled)
 					{
-						impulseApplied = RagdollCoordinator.TryApplyPointImpulse(rigidbody, impulse, shot.HitPoint);
+						impulseApplied = independentWeaponHit
+							? RagdollCoordinator.TryApplyIndependentWeaponPointImpulse(corpse, hitCollider, impulse, shot.HitPoint, out resolvedBodyName)
+							: corpse != null && RagdollCoordinator.TryApplyCorpsePointImpulse(
+								corpse, physicsHitCollider, impulse, shot.HitPoint, out resolvedBodyName);
+						if (!impulseApplied && rigidbody != null)
+						{
+							impulseApplied = RagdollCoordinator.TryApplyPointImpulse(rigidbody, impulse, shot.HitPoint);
+						}
+						LethalImpulseExperiment.AfterCompleted(lethal, impulseApplied);
 					}
-					LethalImpulseExperiment.AfterCompleted(lethal, impulseApplied);
 				}
 			}
 		}
 		if (postMortemImpact)
 		{
 			AngularDriveExperiment.CorpseImpact(corpse, impulseApplied, appliedImpulseMagnitude, resolvedBodyName);
-			RupturePlugin.Log.LogInfo($"RPT corpse bullet impulse: profile={corpse?.PlayerProfileID ?? "unknown"}, applied={impulseApplied}, bodyPart={(bodyPartResolved ? resolvedBodyPart.ToString() : "unresolved")}, " +
-				$"body={resolvedBodyName ?? "unresolved"}, nativeBodyAlive={rigidbody != null}, interactionTarget={interactionTarget.VisualRoot != null}, " +
-				$"impulse={appliedImpulseMagnitude:F2}, speed={pending.VelocityMagnitude:F1}, " +
-				$"massGrams={pending.BulletMassGram:F2}, caliber={ammo.Caliber ?? "unknown"}.");
+			// Debug diagnostics only: several shots of an automatic burst complete in one frame, and every console and file write lands inside this stage.
+			if (RupturePlugin.Log.IsDebugEnabled)
+			{
+				using (ShadowRagdollWorld.TraceMainThread(ShadowRagdollWorld.MainThreadStage.ShotLog))
+				{
+					RupturePlugin.Log.LogInfo($"RPT corpse bullet impulse: profile={corpse?.PlayerProfileID ?? "unknown"}, applied={impulseApplied}, bodyPart={(bodyPartResolved ? resolvedBodyPart.ToString() : "unresolved")}, " +
+						$"body={resolvedBodyName ?? "unresolved"}, nativeBodyAlive={rigidbody != null}, interactionTarget={interactionTarget.VisualRoot != null}, " +
+						$"impulse={appliedImpulseMagnitude:F2}, speed={pending.VelocityMagnitude:F1}, " +
+						$"massGrams={pending.BulletMassGram:F2}, caliber={ammo.Caliber ?? "unknown"}.");
+				}
+			}
 		}
+		return false;
+	}
 
+	/// <summary>Marks the shot as waiting and reports whether it may keep waiting; a shot that waited a second goes on regardless.</summary>
+	private static bool ShouldDefer(ref PendingShot pending, float now)
+	{
+		if (pending.DeferredSince <= 0f) pending.DeferredSince = now;
+		return now - pending.DeferredSince < MaximumShotDeferralSeconds;
 	}
 
 	private static void TryCompleteHeadWound(ref PendingShot pending)

@@ -74,9 +74,9 @@ public static class PhysXBootstrapRuntimeTests
         Physics.simulationMode = SimulationMode.Script;
         using (var api = new NativeApi(Path.Combine(Application.dataPath, "Plugins/x86_64"), false))
         {
-            UnityPhysXMeshGeometrySource Source(bool full = false, Action<ExternalLogLevel, string> log = null,
+            UnityPhysXMeshGeometrySource Source(Action<ExternalLogLevel, string> log = null,
                 Func<Rigidbody, IDisposable> schedule = null) => new UnityPhysXMeshGeometrySource(api, 0, log,
-                    schedule ?? PhysicsBootstrapProbeLease.TrySchedule, full);
+                    schedule ?? PhysicsBootstrapProbeLease.TrySchedule);
 
             Check(!PhysicsExtensions.UpdateController.Step(), "empty support list skips native simulation");
             using (var source = Source())
@@ -108,18 +108,60 @@ public static class PhysXBootstrapRuntimeTests
                 Physics.SyncTransforms();
                 source.PrepareProximity(Vector3.zero, Vector3.zero, 3f, new Collider[] { collider });
                 Check(source.Read(collider).Indices.Length == 3, "proximity mapping still extracts real Unity-cooked geometry");
+                Check(source.TransformsSyncedThisFrame && source.Status.Contains("syncs:") && !source.Status.Contains("syncs:0/"),
+                    "a mapping runs one timed Physics.SyncTransforms and reports it: " + source.Status);
                 source.PrepareProximity(Vector3.zero, Vector3.zero, 3f, Array.Empty<Collider>());
-                Check(source.Read(collider).Indices.Length == 3, "on-demand global fallback still resolves an uncached body mesh");
-                UnityEngine.Object.Destroy(floor); UnityEngine.Object.Destroy(mesh);
+                Check(source.Read(collider).Indices.Length == 3, "an empty proximity request keeps the frame map and still resolves the mapped body mesh");
+                var second = new GameObject("second triangle floor");
+                var secondCollider = second.AddComponent<MeshCollider>(); secondCollider.sharedMesh = mesh;
+                Physics.SyncTransforms();
+                Check(source.Read(secondCollider).Indices.Length == 3, "an unmapped collider resolves through a targeted overlap");
+                Check(source.ShapeMapRefreshes == 0 && source.TargetedShapeMappings >= 2 && source.Status.Contains("refreshes:0"),
+                    "corpse-build style reads never trigger the whole-scene shape remap: " + source.Status);
+                collider.enabled = false;
+                bool shapeless = false;
+                try { source.Read(collider); }
+                catch (UnityPhysXShapeUnavailableException exception) { shapeless = exception.NoNativeShape; }
+                Check(shapeless && source.ShapeMapRefreshes == 0, "a disabled collider reports no native shape without any shape remap");
+                source.ClearNoShapeCache();
+                Check(source.ShapeMapRefreshes == 0 && source.Status.Contains("noShapeCached:0/"), "retiring the negative shape cache for a staged late scene never remaps the scene: " + source.Status);
+
+                // Terrain heightfields are kept for the raid: one native read, then cache hits across frames until the data changes.
+                var terrainData = new TerrainData { heightmapResolution = 33, size = new Vector3(20, 5, 20) };
+                var terrainObject = Terrain.CreateTerrainGameObject(terrainData);
+                terrainObject.transform.position = new Vector3(100, 0, 100);
+                var terrainCollider = terrainObject.GetComponent<TerrainCollider>();
+                MeshGeometryRepository.Configure(source);
+                Physics.SyncTransforms();
+                Check(!MeshGeometryRepository.IsCached(terrainCollider), "a terrain is not cached before its first read");
+                HeightFieldGeometry heightField = MeshGeometryRepository.Get(terrainCollider);
+                Check(MeshGeometryRepository.IsCached(terrainCollider) && source.Status.Contains("extractedHeightFields:1"), "the first terrain read extracts the heightfield once: " + source.Status);
+                yield return null;
+                Check(MeshGeometryRepository.IsCached(terrainCollider) && ReferenceEquals(MeshGeometryRepository.Get(terrainCollider), heightField) &&
+                    source.Status.Contains("extractedHeightFields:1") && MeshGeometryRepository.Describe().Contains("terrainCache=entries:1/reads:1/hits:1/"),
+                    "a cached terrain survives frames without another native read: " + MeshGeometryRepository.Describe());
+                terrainData.SetHeights(0, 0, new float[33, 33]);
+                Check(!MeshGeometryRepository.IsCached(terrainCollider) && MeshGeometryRepository.Describe().Contains("heightmapEdits:1"),
+                    "a heightmap edit retires the cached heightfield: " + MeshGeometryRepository.Describe());
+                Physics.SyncTransforms();
+                Check(!ReferenceEquals(MeshGeometryRepository.Get(terrainCollider), heightField) && MeshGeometryRepository.IsCached(terrainCollider) &&
+                    MeshGeometryRepository.Describe().Contains("invalidations:1"), "an edited terrain is read again and cached again: " + MeshGeometryRepository.Describe());
+                terrainData.heightmapResolution = 65;
+                Check(!MeshGeometryRepository.IsCached(terrainCollider), "a changed heightmap resolution retires the cached heightfield");
+                MeshGeometryRepository.Clear();
+                Check(!MeshGeometryRepository.IsCached(terrainCollider) && MeshGeometryRepository.Describe().Contains("entries:0/"), "ResetRaid-style clearing drops the terrain cache");
+                UnityEngine.Object.Destroy(terrainObject); UnityEngine.Object.Destroy(terrainData);
+                UnityEngine.Object.Destroy(second); UnityEngine.Object.Destroy(floor); UnityEngine.Object.Destroy(mesh);
             }
 
-            using (var source = Source(full: true))
+            using (var source = Source())
             {
                 source.BeginRaid();
                 for (int frame = 0; frame < 8 && !source.IsReady; frame++)
                 { source.Update(); PhysicsExtensions.UpdateController.Step(); yield return null; source.Update(); }
-                Check(source.IsReady && !source.Status.Contains("refreshes:0"), "full-prebake bootstrap retains global mapping: " + source.Status);
+                Check(source.IsReady && source.Status.Contains("refreshes:0"), "bootstrap never maps globally, a full prebake included: " + source.Status);
                 source.PrepareAll();
+                Check(source.ShapeMapRefreshes == 1, "PrepareAll performs the one whole-scene shape map: " + source.Status);
                 Clean(source, "full prebake");
             }
 

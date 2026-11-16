@@ -20,18 +20,36 @@ internal sealed class MeshGeometry
 	internal string CookScaleIdentity = "runtime-mesh-scale";
 	internal Bounds LocalBounds;
 
+	/// <summary>
+	/// SHA-256 over the cooking identity. Memoized per geometry (and shared with unscaled clones, which have an
+	/// identical identity) because every body shape that references the mesh asks for it.
+	/// </summary>
 	internal string CacheKey(string eftBuild)
 	{
-		string source = $"PhysX=4.1.2;EFT={eftBuild};raw={RawHash};layout={Layout};convex={Convex};scale={CookScaleIdentity};cooking={CookingOptions}";
+		CacheKeyMemo memo = _keyMemo ??= new CacheKeyMemo();
+		if (memo.Key != null && string.Equals(memo.EftBuild, eftBuild, StringComparison.Ordinal)) return memo.Key;
+		// A signed-scale bake leaves RawHash unset: hashing the whole mesh is paid here, by whoever asks for the cache key (the owner thread
+		// when it creates the actor), never by the main-thread snapshot that baked it. The arrays are immutable once baked.
+		string source = $"PhysX=4.1.2;EFT={eftBuild};raw={RawHash ??= HashGeometry(Vertices, Indices)};layout={Layout};convex={Convex};scale={CookScaleIdentity};cooking={CookingOptions}";
 		using SHA256 hash = SHA256.Create();
-		return Hex(hash.ComputeHash(Encoding.UTF8.GetBytes(source)));
+		memo.Key = Hex(hash.ComputeHash(Encoding.UTF8.GetBytes(source)));
+		memo.EftBuild = eftBuild;
+		return memo.Key;
 	}
+
+	private sealed class CacheKeyMemo
+	{
+		internal string EftBuild;
+		internal string Key;
+	}
+
+	private CacheKeyMemo _keyMemo;
 
 	internal MeshGeometry BakeNegativeScale(Vector3 scale)
 	{
 		if (scale.x >= 0f && scale.y >= 0f && scale.z >= 0f)
 		{
-			return new MeshGeometry
+			MeshGeometry clone = new MeshGeometry
 			{
 				Vertices = Vertices,
 				Indices = Indices,
@@ -42,6 +60,10 @@ internal sealed class MeshGeometry
 				NativeScale = scale,
 				CookScaleIdentity = "runtime-mesh-scale"
 			};
+			// The identity string omits the native scale, so clones of an unbaked source share one memoized key.
+			if (string.Equals(CookScaleIdentity, clone.CookScaleIdentity, StringComparison.Ordinal))
+				clone._keyMemo = _keyMemo ??= new CacheKeyMemo();
+			return clone;
 		}
 
 		Vector3[] vertices = new Vector3[Vertices.Length];
@@ -65,7 +87,7 @@ internal sealed class MeshGeometry
 			Vertices = vertices,
 			Indices = indices,
 			Layout = Layout + "/baked-signed-scale",
-			RawHash = HashGeometry(vertices, indices),
+			RawHash = null,
 			Convex = Convex,
 			CookingOptions = CookingOptions,
 			NativeScale = Vector3.one,
@@ -73,26 +95,44 @@ internal sealed class MeshGeometry
 		};
 	}
 
+	/// <summary>
+	/// Digest of the little-endian vertex floats then indices. It is the <c>.pxc</c> cache identity, so the byte stream is
+	/// fixed; it is fed through a bounded chunk instead of one buffer sized to the whole mesh.
+	/// </summary>
 	internal static string HashGeometry(Vector3[] vertices, uint[] indices)
 	{
 		using SHA256 hash = SHA256.Create();
-		byte[] bytes = new byte[vertices.Length * 12 + indices.Length * 4];
+		byte[] chunk = new byte[HashChunkBytes];
 		int offset = 0;
 		foreach (Vector3 vertex in vertices)
 		{
-			WriteSingle(bytes, ref offset, vertex.x);
-			WriteSingle(bytes, ref offset, vertex.y);
-			WriteSingle(bytes, ref offset, vertex.z);
+			if (offset + 12 > chunk.Length)
+			{
+				hash.TransformBlock(chunk, 0, offset, null, 0);
+				offset = 0;
+			}
+			WriteSingle(chunk, ref offset, vertex.x);
+			WriteSingle(chunk, ref offset, vertex.y);
+			WriteSingle(chunk, ref offset, vertex.z);
 		}
 		foreach (uint index in indices)
 		{
-			bytes[offset++] = (byte)index;
-			bytes[offset++] = (byte)(index >> 8);
-			bytes[offset++] = (byte)(index >> 16);
-			bytes[offset++] = (byte)(index >> 24);
+			if (offset + 4 > chunk.Length)
+			{
+				hash.TransformBlock(chunk, 0, offset, null, 0);
+				offset = 0;
+			}
+			chunk[offset++] = (byte)index;
+			chunk[offset++] = (byte)(index >> 8);
+			chunk[offset++] = (byte)(index >> 16);
+			chunk[offset++] = (byte)(index >> 24);
 		}
-		return Hex(hash.ComputeHash(bytes));
+		hash.TransformFinalBlock(chunk, 0, offset);
+		return Hex(hash.Hash);
 	}
+
+	private const int HashChunkBytes = 12 * 1024;
+	private static readonly char[] HexDigits = "0123456789abcdef".ToCharArray();
 
 	private static void WriteSingle(byte[] bytes, ref int offset, float value)
 	{
@@ -112,9 +152,13 @@ internal sealed class MeshGeometry
 
 	private static string Hex(byte[] bytes)
 	{
-		StringBuilder builder = new StringBuilder(bytes.Length * 2);
-		foreach (byte value in bytes) builder.Append(value.ToString("x2"));
-		return builder.ToString();
+		char[] characters = new char[bytes.Length * 2];
+		for (int index = 0; index < bytes.Length; index++)
+		{
+			characters[index * 2] = HexDigits[bytes[index] >> 4];
+			characters[index * 2 + 1] = HexDigits[bytes[index] & 15];
+		}
+		return new string(characters);
 	}
 }
 
@@ -129,10 +173,27 @@ internal sealed class HeightFieldGeometry
 	internal float HeightScale, RowScale, ColumnScale, ConvexEdgeThreshold;
 	internal uint HeightFieldFlags, GeometryFlags;
 
+	/// <summary>
+	/// Cache identity of the heightfield. Memoized because the raid-lifetime terrain cache hands the same instance to every
+	/// consumer, and the owner asks for the key twice per creation (residency check, then attach).
+	/// </summary>
 	internal string CacheKey(string eftBuild)
 	{
-		return $"PhysX=4.1.2;EFT={eftBuild};heightfield=0x{NativeIdentity:X16};timestamp={Timestamp};rows={Rows};columns={Columns};stride={SampleStride};flags={HeightFieldFlags};threshold={ConvexEdgeThreshold:R}";
+		KeyMemo memo = _keyMemo;
+		if (memo != null && string.Equals(memo.EftBuild, eftBuild, StringComparison.Ordinal)) return memo.Key;
+		string key = $"PhysX=4.1.2;EFT={eftBuild};heightfield=0x{NativeIdentity:X16};timestamp={Timestamp};rows={Rows};columns={Columns};stride={SampleStride};flags={HeightFieldFlags};threshold={ConvexEdgeThreshold:R}";
+		_keyMemo = new KeyMemo(eftBuild, key);
+		return key;
 	}
+
+	private sealed class KeyMemo
+	{
+		internal readonly string EftBuild;
+		internal readonly string Key;
+		internal KeyMemo(string eftBuild, string key) { EftBuild = eftBuild; Key = key; }
+	}
+
+	private KeyMemo _keyMemo;
 }
 
 internal static class MeshGeometryReader

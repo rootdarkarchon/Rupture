@@ -28,7 +28,7 @@ using MainThreadStage = Rupture.Ragdolls.Classes.ShadowRagdollWorld.MainThreadSt
 
 namespace Rupture;
 
-[BepInPlugin("com.rootdarkarchon.rupture", "Rupture", "1.4.2")]
+[BepInPlugin("com.rootdarkarchon.rupture", "Rupture", "1.4.3")]
 [BepInDependency("com.fika.core", BepInDependency.DependencyFlags.SoftDependency)]
 [BepInDependency("com.janky.hollywoodfx", BepInDependency.DependencyFlags.SoftDependency)]
 [DefaultExecutionOrder(32000)]
@@ -93,7 +93,7 @@ public class RupturePlugin : BaseUnityPlugin
 		ConsoleScreen.Processor.RegisterCommand("RPTAngularDump", AngularDriveExperiment.Dump);
 		ConsoleScreen.Processor.RegisterCommand("RPTShadowStatus", ShadowRagdollWorld.LogStatus);
 		ConsoleScreen.Processor.RegisterCommand("RPTHeadWoundStatus", HeadWoundSystem.LogStatus);
-		Log.Initialization("Rupture 1.4.2 initialized. Performance trace schema=12 (half-second soaking, sleep-aware physics, 4 Hz movable-root polling). Runtime diagnostics require Enable Debug Logging.");
+		Log.Initialization("Rupture 1.4.3 initialized. Performance trace schema=13 (kill-window trace, frame work budget). Runtime diagnostics require Enable Debug Logging.");
 	}
 
 	private static void EnableNativeRagdollIntegration()
@@ -196,7 +196,6 @@ public class RupturePlugin : BaseUnityPlugin
 	{
 		if (!_initialized) return;
 		ShadowVisiblePosePlayerLoop.EnsureInstalled();
-
 	}
 
 	private void Update()
@@ -204,7 +203,7 @@ public class RupturePlugin : BaseUnityPlugin
 		if (!_initialized) return;
 		long callbackStarted = ShadowRagdollWorld.PerformanceLoggingEnabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
 		bool raidWorldActive = Singleton<GameWorld>.Instantiated;
-		ProceduralCutFrameBudget.BeginFrame(RuptureConfiguration.ProceduralLimbCutMainThreadBudget?.Value ?? 2f);
+		FrameWorkBudget.BeginFrame(RuptureConfiguration.ProceduralLimbCutMainThreadBudget?.Value ?? 2f);
 		bool headCutsFirst = (Time.frameCount & 1) == 0;
 		try
 		{
@@ -226,13 +225,13 @@ public class RupturePlugin : BaseUnityPlugin
 					// initialized. Revalidate the presentation-only pass at the raid boundary.
 					ShadowVisiblePosePlayerLoop.EnsureInstalled();
 					HeadWoundSystem.PrepareResources();
+					RaidWarmup.Begin();
 				}
 			}
 			bool raidSimulationActive = raidWorldActive && _raidSimulationStarted;
 			using (ShadowRagdollWorld.TraceMainThread(MainThreadStage.ImpactNetwork, raidWorldActive)) ImpactNetwork.Update();
 			using (ShadowRagdollWorld.TraceMainThread(MainThreadStage.ImpactState, raidWorldActive)) ImpactStateService.Update();
 			using (ShadowRagdollWorld.TraceMainThread(MainThreadStage.ShotImpacts, raidWorldActive)) ShotImpactProcessor.Update();
-			using (ShadowRagdollWorld.TraceMainThread(MainThreadStage.Headgear, raidWorldActive)) LethalHeadgearDetach.Update();
 			if (headCutsFirst) using (ShadowRagdollWorld.TraceMainThread(MainThreadStage.HeadWounds, raidWorldActive)) HeadWoundSystem.Update();
 			using (ShadowRagdollWorld.TraceMainThread(MainThreadStage.Blood, raidWorldActive)) PulsatingBloodStreamSystem.Update();
 			using (ShadowRagdollWorld.TraceMainThread(MainThreadStage.FracturesUpdate, raidWorldActive)) FractureSystem.Update();
@@ -240,6 +239,11 @@ public class RupturePlugin : BaseUnityPlugin
 			using (ShadowRagdollWorld.TraceMainThread(MainThreadStage.ShadowUpdate, raidWorldActive)) ShadowRagdollWorld.Update(raidWorldActive, raidSimulationActive);
 			using (ShadowRagdollWorld.TraceMainThread(MainThreadStage.LimbCuts, raidWorldActive)) LimbDismembermentSystem.Update();
 			if (!headCutsFirst) using (ShadowRagdollWorld.TraceMainThread(MainThreadStage.HeadWounds, raidWorldActive)) HeadWoundSystem.Update();
+			// Headgear throws are deferrable: they run after physics adoption, limb cuts and head
+			// wounds, so a throw never shares a frame with a ragdoll build.
+			using (ShadowRagdollWorld.TraceMainThread(MainThreadStage.Headgear, raidWorldActive)) LethalHeadgearDetach.Update();
+			// Warmup is deferrable too: one step at most, and never in a frame that already ran heavy work.
+			if (raidWorldActive) RaidWarmup.Update();
 			Health.BotSeverStateService.Update(raidSimulationActive);
 			using (ShadowRagdollWorld.TraceMainThread(MainThreadStage.PhysicsDiagnostics, raidWorldActive)) RagdollPhysicsDiagnostics.Update();
 
@@ -256,6 +260,7 @@ public class RupturePlugin : BaseUnityPlugin
 		finally
 		{
 			ShadowRagdollWorld.RecordPluginUpdate(callbackStarted, raidWorldActive);
+			KillWindowTrace.AddMainThread(callbackStarted);
 		}
 	}
 
@@ -279,6 +284,7 @@ public class RupturePlugin : BaseUnityPlugin
 		// Keep diagnostic formatting and log I/O outside the measured physics and
 		// presentation callback. Either periodic diagnostic can run independently.
 		using (ShadowRagdollWorld.TraceMainThread(MainThreadStage.DiagnosticLogging, raidSimulationActive)) ShadowRagdollWorld.UpdateStatusLogging(raidSimulationActive);
+		KillWindowTrace.EndFrame(callbackStarted);
 	}
 
 	private static bool IsRaidSimulationReady()
@@ -303,6 +309,8 @@ public class RupturePlugin : BaseUnityPlugin
 		Health.BotSeverStateService.Reset();
 		ShotImpactProcessor.Reset();
 		LethalHeadgearDetach.Reset();
+		RaidWarmup.Reset();
+		KillWindowTrace.Reset();
 		HeadWoundSystem.Reset();
 		PulsatingBloodStreamSystem.Reset();
 		FractureSystem.Reset();

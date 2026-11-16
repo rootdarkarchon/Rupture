@@ -136,6 +136,8 @@ internal static partial class LimbDismembermentSystem
 	{
 		internal SkinnedMeshRenderer Native;
 		internal Mesh ImmutableMesh;
+		/// <summary>Cached weighted-bone answers keyed by (mesh, limb root) instance ids.</summary>
+		internal readonly Dictionary<long, bool> WeightedBoneCache = new Dictionary<long, bool>();
 		internal SkinnedMeshRenderer SocketRenderer;
 		internal SkinnedMeshRenderer DebugRenderer;
 		internal Mesh BodyMesh;
@@ -260,6 +262,9 @@ internal static partial class LimbDismembermentSystem
 	private static Material[] _debugMaterials;
 	private static LimbCutCaptureSession _clothingCaptureSession;
 	private static readonly HashSet<string> ReportedClothingSkips = new HashSet<string>();
+	private static readonly List<SeverRecord> AllCutsScratch = new List<SeverRecord>();
+	private static readonly List<SeverRecord> RelevantCutsScratch = new List<SeverRecord>();
+	private static readonly List<ProceduralLimbCutGeometry.CutSpec> CutSpecScratch = new List<ProceduralLimbCutGeometry.CutSpec>();
 
 	internal static void Reset()
 	{
@@ -267,6 +272,9 @@ internal static partial class LimbDismembermentSystem
 		_clothingCaptureSession = null;
 		LimbCutCaptureQueue.Reset();
 		ReportedClothingSkips.Clear();
+		AllCutsScratch.Clear();
+		RelevantCutsScratch.Clear();
+		CutSpecScratch.Clear();
 		ProcessDeferredWorkerCleanup();
 		CancelPending(_active);
 		_active = null;
@@ -357,12 +365,12 @@ internal static partial class LimbDismembermentSystem
 
 	internal static void Update()
 	{
-		long started = Stopwatch.GetTimestamp(), chargedBefore = ProceduralCutFrameBudget.SpentTicks;
+		long started = Stopwatch.GetTimestamp(), chargedBefore = FrameWorkBudget.SpentTicks;
 		try { UpdateCore(); }
 		finally
 		{
-			long charged = ProceduralCutFrameBudget.SpentTicks - chargedBefore;
-			ProceduralCutFrameBudget.RecordStage(Stopwatch.GetTimestamp() - started - charged);
+			long charged = FrameWorkBudget.SpentTicks - chargedBefore;
+			FrameWorkBudget.RecordStage(Stopwatch.GetTimestamp() - started - charged);
 		}
 	}
 
@@ -372,7 +380,7 @@ internal static partial class LimbDismembermentSystem
 		while (LimbCutCaptureQueue.TryDequeueReport(out string captureReport))
 			RupturePlugin.Log.LogInfo("RPT limb clothing case: " + captureReport);
 		ProcessDeferredWorkerCleanup();
-		ProceduralCutFrameBudget.RecordStage(Stopwatch.GetTimestamp() - housekeepingStarted);
+		FrameWorkBudget.RecordStage(Stopwatch.GetTimestamp() - housekeepingStarted);
 		if (_active == null && Pending.Count > 0)
 		{
 			_active = Pending.Dequeue();
@@ -392,8 +400,8 @@ internal static partial class LimbDismembermentSystem
 			_active = null;
 			return;
 		}
-		double budget = ProceduralCutFrameBudget.BudgetMilliseconds;
-		while (ReferenceEquals(_active, request) && ProceduralCutFrameBudget.CanRunStage)
+		double budget = FrameWorkBudget.BudgetMilliseconds;
+		while (ReferenceEquals(_active, request) && FrameWorkBudget.CanRunStage)
 		{
 			long started = Stopwatch.GetTimestamp();
 			SeverStage executedStage = request.Stage;
@@ -436,7 +444,7 @@ internal static partial class LimbDismembermentSystem
 			}
 			finally
 			{
-				ProceduralCutFrameBudget.RecordStage(Stopwatch.GetTimestamp() - started);
+				FrameWorkBudget.RecordStage(Stopwatch.GetTimestamp() - started);
 				UnityEngine.Profiling.Profiler.EndSample();
 			}
 
@@ -448,7 +456,7 @@ internal static partial class LimbDismembermentSystem
 			if (!ReferenceEquals(_active, request)) break;
 			bool madeProgress = request.Stage != executedStage ||
 				executedStage == SeverStage.Materialize && request.MaterializeIndex != materializeIndex;
-			if (!madeProgress || !ProceduralCutFrameBudget.CanRunStage) break;
+			if (!madeProgress || !FrameWorkBudget.CanRunStage) break;
 		}
 		if (PerformanceLoggingEnabled && !ReferenceEquals(_active, request))
 			RupturePlugin.Log.LogInfo($"RPT limb cut transaction: bodyPart={request.BodyPart}, status={request.FinalStatus}, queueWaitMs={TicksToMilliseconds(request.QueueWaitTicks):F3}, " +
@@ -733,7 +741,7 @@ internal static partial class LimbDismembermentSystem
 	private static void Complete(PendingSever request, SeverCompletionStatus status, string failure)
 	{
 		request.FinalStatus = status;
-		if (request.GeometryJob != null)
+		if (request.GeometryJob != null && RupturePlugin.Log.IsDebugEnabled)
 			RupturePlugin.Log.LogInfo($"RPT limb clothing completion: request='{request.ReservationKey}:{request.IrregularitySeed}', " +
 				$"part={request.BodyPart}, level={request.Level}, status={status}, reason='{failure ?? "none"}'");
 		if (status == SeverCompletionStatus.Committed) _committedCuts++;
@@ -846,7 +854,8 @@ internal static partial class LimbDismembermentSystem
 		captured = null;
 		capturedSources = null;
 		failure = null;
-		List<SeverRecord> allCuts = new List<SeverRecord>(state.Cuts.Count + 1);
+		List<SeverRecord> allCuts = AllCutsScratch;
+		allCuts.Clear();
 		allCuts.AddRange(state.Cuts);
 		allCuts.Add(newCut);
 		List<GeometryBuildWork> work = new List<GeometryBuildWork>();
@@ -860,9 +869,10 @@ internal static partial class LimbDismembermentSystem
 			SkinnedMeshRenderer source = sourceState?.Native;
 			if (source == null) continue;
 			Mesh immutable = sourceState.ImmutableMesh != null ? sourceState.ImmutableMesh : source.sharedMesh;
-			if (!RendererSupportsEitherCut(source, newCut))
+			Transform[] bones = source.bones;
+			if (!RendererSupportsEitherCut(bones, newCut))
 			{
-				if (captureClothing && RendererHasWeightedBone(source, newCut.LimbRoot))
+				if (captureClothing && RendererHasWeightedBone(sourceState, bones, newCut.LimbRoot, false))
 				{
 					string identity = $"{source.name}:{source.sharedMesh?.name}:{sourceState.LodLevel}:{newCut.BodyPart}:{newCut.Level}";
 					if (ReportedClothingSkips.Add(identity))
@@ -878,22 +888,29 @@ internal static partial class LimbDismembermentSystem
 					RupturePlugin.Log.LogWarning($"RPT limb clothing classified Unreadable: request='{state.Key}', part={newCut.BodyPart}, renderer='{source.name}', mesh='{immutable?.name}', meshId={immutable?.GetInstanceID()}, lod={sourceState.LodLevel}, runtimeReadable={immutable != null && immutable.isReadable}, retainedSource={sourceState.ImmutableMesh != null}; {readableFailure}. Cutting and retries skipped.");
 				continue;
 			}
-			if (!RendererHasWeightedBone(source, newCut.Frame.ProximalRoot)) continue;
+			if (!RendererHasWeightedBone(sourceState, bones, newCut.Frame.ProximalRoot, false)) continue;
 			if (!TryEnsureImmutableSource(state, sourceState, out string immutableFailure))
 			{
 				failure = $"immutable source for affected renderer {source.name} is unavailable: {immutableFailure}";
 				return false;
 			}
-			List<SeverRecord> relevantCuts = allCuts.Where(cut => cut == newCut || RendererSupportsEitherCut(source, cut) &&
-				RendererHasWeightedBone(source, cut.LimbRoot, sourceState.ImmutableMesh)).ToList();
+			List<SeverRecord> relevantCuts = RelevantCutsScratch;
+			relevantCuts.Clear();
+			foreach (SeverRecord cut in allCuts)
+			{
+				if (cut == newCut || RendererSupportsEitherCut(bones, cut) &&
+					RendererHasWeightedBone(sourceState, bones, cut.LimbRoot, true))
+					relevantCuts.Add(cut);
+			}
 			int newCutIndex = relevantCuts.IndexOf(newCut);
 			if (newCutIndex < 0) continue;
-			List<ProceduralLimbCutGeometry.CutSpec> specs = relevantCuts
-				.Select(cut => cut.ToSpec(sourceState)).ToList();
+			List<ProceduralLimbCutGeometry.CutSpec> specs = CutSpecScratch;
+			specs.Clear();
+			foreach (SeverRecord cut in relevantCuts) specs.Add(cut.ToSpec(sourceState));
 			foreach (var spec in specs) SupplyMissingBindFrames(state, sourceState, spec);
 			long captureStarted = Stopwatch.GetTimestamp();
 			if (!ProceduralLimbCutGeometry.TryCaptureClassificationWork(sourceState.ImmutableMesh,
-				source.transform, source.bones, specs,
+				source.transform, bones, specs,
 				out ProceduralLimbCutGeometry.ClassificationWork capturedWork, out string captureFailure))
 			{
 				failure = $"renderer {source.name} classification capture failed: {captureFailure}";
@@ -1377,8 +1394,9 @@ internal static partial class LimbDismembermentSystem
 			exactGib = true;
 		}
 		gibPointLocal = gibFrame.InverseTransformPoint(gibPointWorld);
-		RupturePlugin.Log.LogInfo($"Resolved procedural stump origins inside caps: body={bodyPointWorld}, gib={gibPointWorld}, " +
-			$"bodyFromGeneratedCap={exactBody}, gibFromGeneratedCap={exactGib}, bodyAnchor={bodyAnchor.name}.");
+		if (RupturePlugin.Log.IsDebugEnabled)
+			RupturePlugin.Log.LogInfo($"Resolved procedural stump origins inside caps: body={bodyPointWorld}, gib={gibPointWorld}, " +
+				$"bodyFromGeneratedCap={exactBody}, gibFromGeneratedCap={exactGib}, bodyAnchor={bodyAnchor.name}.");
 	}
 
 	private static Transform ResolveWeightedAnchor(SkinnedMeshRenderer renderer, BoneWeight weight, Transform fallback)
@@ -1959,9 +1977,8 @@ internal static partial class LimbDismembermentSystem
 		return null;
 	}
 
-	private static bool RendererSupportsEitherCut(SkinnedMeshRenderer renderer, SeverRecord cut)
+	private static bool RendererSupportsEitherCut(Transform[] bones, SeverRecord cut)
 	{
-		Transform[] bones = renderer?.bones;
 		CutFrame frame = cut?.Frame;
 		return bones != null && frame != null && Array.IndexOf(bones, frame.Joint) >= 0 &&
 			(Array.IndexOf(bones, frame.ProximalStart) >= 0 || Array.IndexOf(bones, frame.DistalEnd) >= 0);
@@ -1992,22 +2009,58 @@ internal static partial class LimbDismembermentSystem
 		}
 	}
 
-	private static bool RendererHasWeightedBone(SkinnedMeshRenderer renderer, Transform root, Mesh immutable = null)
+	/// <summary>
+	/// Whether any vertex of the selected mesh carries more than a 1% weight on the bones under
+	/// <paramref name="root"/>. The answer is immutable for a (mesh, root) pair, so it is cached
+	/// on the source state for the cut-state lifetime; repeated cuts never rescan the weights.
+	/// </summary>
+	/// <param name="useImmutableMesh">Test the retained immutable mesh instead of the renderer's current mesh.</param>
+	private static bool RendererHasWeightedBone(SourceRendererState state, Transform[] bones, Transform root,
+		bool useImmutableMesh)
 	{
-		Transform[] bones = renderer?.bones;
-		Mesh mesh = immutable != null ? immutable : renderer?.sharedMesh;
+		Mesh mesh = useImmutableMesh && state.ImmutableMesh != null ? state.ImmutableMesh : state.Native.sharedMesh;
 		if (bones == null || mesh == null || !mesh.isReadable) return false;
-		HashSet<int> limbBones = new HashSet<int>();
+		long key = ((long)mesh.GetInstanceID() << 32) | (uint)(root != null ? root.GetInstanceID() : 0);
+		if (state.WeightedBoneCache.TryGetValue(key, out bool cached)) return cached;
+		bool result = ComputeWeightedBone(mesh, bones, root);
+		state.WeightedBoneCache[key] = result;
+		return result;
+	}
+
+	/// <summary>
+	/// Scans the mesh's native skin-weight views, which avoid the full managed BoneWeight[] copy that
+	/// <c>Mesh.boneWeights</c> makes. Only the four strongest influences per vertex count, matching the
+	/// legacy BoneWeight layout this test originally used.
+	/// </summary>
+	private static bool ComputeWeightedBone(Mesh mesh, Transform[] bones, Transform root)
+	{
+		var bonesPerVertex = mesh.GetBonesPerVertex();
+		if (bonesPerVertex.Length == 0) return false;
+		var weights = mesh.GetAllBoneWeights();
+		bool[] limbBones = new bool[bones.Length];
+		bool anyLimbBone = false;
 		for (int index = 0; index < bones.Length; index++)
-			if (bones[index] == root || (bones[index] != null && bones[index].IsChildOf(root))) limbBones.Add(index);
-		foreach (BoneWeight weight in mesh.boneWeights)
 		{
+			if (bones[index] == root || (bones[index] != null && bones[index].IsChildOf(root)))
+			{
+				limbBones[index] = true;
+				anyLimbBone = true;
+			}
+		}
+		if (!anyLimbBone) return false;
+		int offset = 0;
+		for (int vertex = 0; vertex < bonesPerVertex.Length; vertex++)
+		{
+			int count = bonesPerVertex[vertex];
+			int limit = count < 4 ? count : 4;
 			float sum = 0f;
-			if (limbBones.Contains(weight.boneIndex0)) sum += weight.weight0;
-			if (limbBones.Contains(weight.boneIndex1)) sum += weight.weight1;
-			if (limbBones.Contains(weight.boneIndex2)) sum += weight.weight2;
-			if (limbBones.Contains(weight.boneIndex3)) sum += weight.weight3;
+			for (int influence = 0; influence < limit; influence++)
+			{
+				BoneWeight1 weight = weights[offset + influence];
+				if ((uint)weight.boneIndex < (uint)limbBones.Length && limbBones[weight.boneIndex]) sum += weight.weight;
+			}
 			if (sum > 0.01f) return true;
+			offset += count;
 		}
 		return false;
 	}

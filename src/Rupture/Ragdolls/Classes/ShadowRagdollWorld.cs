@@ -134,6 +134,10 @@ internal static partial class ShadowRagdollWorld
 	{
 		internal EFT.Interactive.CorpseRagdoll Ragdoll;
 		internal int EarliestFrame;
+		/// <summary>Realtime when the build first waited on its environment prefetch; zero while it has not waited.</summary>
+		internal float PrefetchWaitStartedAt;
+		/// <summary>The native rigidbody the build tracks when the ragdoll holds no weapon (see <see cref="TryGetBuildCorridor"/>); resolved on first use.</summary>
+		internal Rigidbody NativeCenterBody;
 	}
 
 	private sealed class PendingDetachedEffect
@@ -212,7 +216,10 @@ internal static partial class ShadowRagdollWorld
 		internal ShadowBody ParkedAnchor;
 		internal Vector3 ParkedLocalPosition;
 		internal Quaternion ParkedLocalRotation = Quaternion.identity;
-		internal readonly List<Collider> NativeColliders = new List<Collider>();
+		/// <summary>Every collider structurally attached to the body, including disabled ones; hit resolution, disable matching and bounds checks use it.</summary>
+		internal readonly List<Collider> NativeColliders = new List<Collider>(4);
+		/// <summary>Bone bodies only: the subset Unity simulates (enabled, active, non-trigger, owned by the body, outside the hands weapon), which is what the external actor captured. Empty for the weapon.</summary>
+		internal readonly List<Collider> SimulatedColliders = new List<Collider>(4);
 	}
 
 	private sealed class ExternalJointBinding
@@ -250,12 +257,32 @@ internal static partial class ShadowRagdollWorld
 		internal bool EnvironmentAcquired;
 		internal uint ExternalGroup;
 		internal int NextEnvironmentRefreshFrame;
-		internal readonly List<ShadowBody> Bodies = new List<ShadowBody>();
-		internal readonly List<ShadowBody> CoreBodies = new List<ShadowBody>();
-		internal readonly Dictionary<Rigidbody, ShadowBody> BodiesByNative = new Dictionary<Rigidbody, ShadowBody>();
-		internal readonly List<DetachedEffect> DetachedEffects = new List<DetachedEffect>();
+		/// <summary>Whether a corridor prefetch was requested for this rig; <see cref="PrefetchCenter"/> and <see cref="PrefetchSweepEnd"/> hold its region.</summary>
+		internal bool PrefetchRequested;
+		internal Vector3 PrefetchCenter;
+		internal Vector3 PrefetchSweepEnd;
+		/// <summary>Bounded waits for the environment capture a body needs before it may move: the corpse wake, the independent weapon wake, a detached gib's impulse or attachment, and a drag translation. Each polls its own corridor.</summary>
+		internal EnvironmentWaitState CorpseWake;
+		internal EnvironmentWaitState WeaponWake;
+		internal EnvironmentWaitState GibWake;
+		internal EnvironmentWaitState TranslationWake;
+		/// <summary>Frame of the last time a post-mortem shot waited on this settled rig's corpse wake; <see cref="ProcessPendingWakes"/> leaves the wake to that shot, so one wake sends one reactivation.</summary>
+		internal int ImpactWaitFrame;
+		/// <summary>Root of the weapon the corpse held in its hands at build time; its colliders are never captured on bone bodies. Null when unknown.</summary>
+		internal Transform HandsWeaponRoot;
+		/// <summary>Reused between bodies by <see cref="TryCreateBody"/> to hold the simulated subset until it is copied onto the body.</summary>
+		internal readonly List<Collider> SimulatedScratch = new List<Collider>(16);
+		/// <summary>Colliders left off bone bodies by <see cref="GetSimulatedBodyColliders"/>, by reason, for the build diagnostics line.</summary>
+		internal int SkippedTriggerColliders;
+		internal int SkippedInactiveColliders;
+		internal int SkippedForeignBodyColliders;
+		internal int SkippedWeaponColliders;
+		internal readonly List<ShadowBody> Bodies = new List<ShadowBody>(16);
+		internal readonly List<ShadowBody> CoreBodies = new List<ShadowBody>(8);
+		internal readonly Dictionary<Rigidbody, ShadowBody> BodiesByNative = new Dictionary<Rigidbody, ShadowBody>(16);
+		internal readonly List<DetachedEffect> DetachedEffects = new List<DetachedEffect>(8);
 		internal readonly HashSet<ShadowBody> PermanentlyDisabledBodies = new HashSet<ShadowBody>();
-		internal readonly List<ExternalJointBinding> ExternalJoints = new List<ExternalJointBinding>();
+		internal readonly List<ExternalJointBinding> ExternalJoints = new List<ExternalJointBinding>(16);
 		internal HashSet<Transform> RebuildSeveredBones; // set only while a handoff adoption rebuilds the core rig
 	}
 
@@ -280,6 +307,12 @@ internal static partial class ShadowRagdollWorld
 	private static readonly List<Vector3> ActiveRigCenters = new List<Vector3>();
 	private static readonly List<ShadowRig> ImpactWakeQueue = new List<ShadowRig>();
 	private static readonly HashSet<ShadowRig> ImpactWakeVisited = new HashSet<ShadowRig>();
+	/// <summary>Source bounds of the rig whose settled neighbors <see cref="QueueTouchingSettledNeighbors"/> is scanning.</summary>
+	private static readonly List<Bounds> NeighborWakeSourceBounds = new List<Bounds>(32);
+	/// <summary>Neighbors whose rig centers are farther apart than this cannot touch: a humanoid rig spans under 2.5 m from any of its bones, so two reach 5 m plus the contact margin.</summary>
+	private const float NeighborWakeMaximumCenterDistance = 6f;
+	/// <summary>Settled rigs whose impact wake is waiting for an environment capture; <see cref="ProcessPendingWakes"/> retries them until they wake or the wait ends.</summary>
+	private static readonly List<ShadowRig> PendingWakeRigs = new List<ShadowRig>();
 	private static readonly HashSet<IShadowBodyProxy> LateVisibleBodies = new HashSet<IShadowBodyProxy>();
 	private static int _buildFailures;
 	private static int _successfulBuilds;
@@ -390,6 +423,8 @@ internal static partial class ShadowRagdollWorld
 		_externalFallbackLogged = false;
 		_externalRaidFailure = null;
 		_externalGroupSequence = 0;
+		_prefetchDisabled = false;
+		BotPrefetches.Clear();
 		ResetExternalResultMetrics();
 		ResetMainThreadTimingMetrics();
 		int deadbodyLayer = LayerMask.NameToLayer("Deadbody");
@@ -406,6 +441,8 @@ internal static partial class ShadowRagdollWorld
 			DeadbodyLayer = deadbodyLayer,
 			EnvironmentMask = BuildEnvironmentMask(),
 			ScheduleBootstrapProbe = PhysicsBootstrapProbeLease.TrySchedule,
+			InfoLoggingEnabled = () => RupturePlugin.Log?.IsDebugEnabled == true,
+			DeferrableFrame = () => FrameWorkBudget.CanRunDeferrableStage,
 			EftBuild = Application.version,
 			Log = (level, message) =>
 			{
@@ -529,6 +566,7 @@ internal static partial class ShadowRagdollWorld
 		{
 			return;
 		}
+		using (TraceMainThread(MainThreadStage.EnvironmentPrefetch)) PumpEnvironmentPrefetch();
 		long constructionStarted = BeginTiming();
 		bool continuousSimulation = ContinuousSimulationEnabled;
 		if (continuousSimulation && !EnsureScene(out string sceneFailure))
@@ -542,6 +580,7 @@ internal static partial class ShadowRagdollWorld
 		}
 		_continuousSceneFailureLogged = false;
 		ProcessPendingBuilds();
+		ProcessPendingWakes();
 		UpdateLivingFalls();
 		ProcessPendingDetachedEffects();
 		ProcessPendingLocalGibActors();
@@ -576,7 +615,7 @@ internal static partial class ShadowRagdollWorld
 		for (int offset = 0; offset < refreshCount; offset++)
 		{
 			ShadowRig rig = RigSnapshot[(refreshStart + offset) % refreshCount];
-			if (rig == null || (!rig.Active && !rig.Dormant && CountAwakeIndependentBodies(rig) == 0))
+			if (rig == null || IsEnvironmentProbeIdle(rig))
 			{
 				continue;
 			}
@@ -974,6 +1013,7 @@ internal static partial class ShadowRagdollWorld
 		_resetLocalSimulation?.Invoke();
 		_weaponColliderAudits = 0;
 		PendingBuilds.Clear();
+		CancelAllPrefetches();
 		foreach (PendingDetachedEffect pending in PendingDetachedEffects)
 		{
 			if (pending?.LocalEnvironmentOnly == true && pending.Root != null) DestroyObject(pending.Root);
@@ -1010,6 +1050,9 @@ internal static partial class ShadowRagdollWorld
 		ActiveRigCenters.Clear();
 		ImpactWakeQueue.Clear();
 		ImpactWakeVisited.Clear();
+		PendingWakeRigs.Clear();
+		_exactHitResolution = default;
+		_nearestHitResolution = default;
 		LateVisibleBodies.Clear();
 		_buildFailures = 0;
 		_successfulBuilds = 0;
@@ -1018,6 +1061,9 @@ internal static partial class ShadowRagdollWorld
 		_independentWeaponWakeCount = 0;
 		_independentWeaponEnvironmentReacquireCount = 0;
 		_deferredProximityRefreshes = 0;
+		_environmentAsyncAcquisitions = 0;
+		_environmentSyncFallbacks = 0;
+		_environmentSyncDirect = 0;
 		_proximityAcquireFrame = -1;
 		_proximityAcquiresThisFrame = 0;
 		_environmentRefreshCursor = 0;
@@ -1471,6 +1517,81 @@ internal static partial class ShadowRagdollWorld
 		return attached;
 	}
 
+	/// <summary>
+	/// Narrows the structural colliders of a bone body to the ones Unity simulates, which are the ones the external actor must
+	/// represent: not a trigger, enabled and active, owned by this rigidbody, and outside the weapon held in the corpse's hands.
+	/// Skips are counted per reason on the rig. <paramref name="structural"/> already holds every collider under the body, so
+	/// no second hierarchy traversal is needed.
+	/// </summary>
+	private static void GetSimulatedBodyColliders(ShadowRig rig, Rigidbody nativeBody, List<Collider> structural, List<Collider> into)
+	{
+		into.Clear();
+		Transform handsWeaponRoot = rig.HandsWeaponRoot;
+		for (int index = 0; index < structural.Count; index++)
+		{
+			Collider collider = structural[index];
+			if (collider == null) continue;
+			if (collider.isTrigger)
+			{
+				rig.SkippedTriggerColliders++;
+				continue;
+			}
+			if (!collider.enabled || !collider.gameObject.activeInHierarchy)
+			{
+				rig.SkippedInactiveColliders++;
+				continue;
+			}
+			if (collider.attachedRigidbody != nativeBody)
+			{
+				rig.SkippedForeignBodyColliders++;
+				continue;
+			}
+			if (handsWeaponRoot != null && collider.transform.IsChildOf(handsWeaponRoot))
+			{
+				rig.SkippedWeaponColliders++;
+				continue;
+			}
+			into.Add(collider);
+		}
+	}
+
+	/// <summary>
+	/// Resolves the root of the weapon the corpse holds in its hands: the hands controller's object (its root carries the
+	/// weapon prefab, and DropItemDead later adds the weapon rigidbody to it), else the ragdoll's attached weapon. Null when unknown.
+	/// </summary>
+	private static Transform ResolveHandsWeaponRoot(Corpse corpse, EFT.Interactive.CorpseRagdoll ragdoll)
+	{
+		if (RagdollCoordinator.TryGetInteractionTarget(corpse, out CorpseInteractionTarget target))
+		{
+			GameObject controllerObject = target.Player?.HandsController?.ControllerGameObject;
+			if (controllerObject != null) return controllerObject.transform;
+		}
+		Rigidbody weapon = ragdoll?.WeaponRigidbody;
+		return weapon != null ? weapon.transform : null;
+	}
+
+	private static string DescribeBuildCounters(ExternalBuildCounters counters)
+	{
+		return $"shapeMapRefreshes={counters.ShapeMapRefreshes}, targetedMappings={counters.TargetedShapeMappings}, meshExtractions={counters.MeshExtractions}, " +
+			$"cooks={counters.MeshCooks}, diskHits={counters.MeshDiskHits}, memoryHits={counters.MeshMemoryHits}, noShape={counters.NoShapeColliders}";
+	}
+
+	/// <summary>
+	/// True while external physics will take the weapon off its native hand joint soon, so a native ignore of the weapon pairs
+	/// would be reverted at once: the rig accepts a late weapon (mirrors <see cref="AttachLateWeapon"/>), or the ragdoll is queued
+	/// for a build that can run (the external raid is ready). A build that cannot run yet (bootstrap probe or full prebake still
+	/// pending) does not count: the native corpse would simulate unprotected for that whole wait, and the later
+	/// <see cref="DetachWeaponFromCorpse"/> restores the ignore anyway.
+	/// </summary>
+	internal static bool WillTakeWeapon(EFT.Interactive.CorpseRagdoll ragdoll, Rigidbody weapon)
+	{
+		if (ragdoll == null || weapon == null) return false;
+		if (RigsByRagdoll.TryGetValue(ragdoll, out ShadowRig rig))
+			return (rig.Active || rig.Dormant) && rig.WeaponBody == null && !rig.BodiesByNative.ContainsKey(weapon);
+		// A build held for a pending prefetch can leave the native corpse simulating for the bounded wait; keep native parity meanwhile.
+		return UsingExternalBackend && _externalRuntime.IsRaidReady && HasPendingDragRig(ragdoll) && !IsCorpsePrefetchPending(ragdoll);
+	}
+
 	private static void ParkSeveredBody(ShadowRig rig, ShadowBody body)
 	{
 		if (body?.Proxy == null) return;
@@ -1609,7 +1730,40 @@ internal static partial class ShadowRagdollWorld
 		return true;
 	}
 
+	/// <summary>Memo of one hit resolution: a shot resolves the same collider against the same rig up to four times in one frame, each a walk over every body collider.</summary>
+	private struct HitResolution
+	{
+		internal ShadowRig Rig;
+		internal Collider Collider;
+		internal ShadowBody Body;
+		internal int Frame;
+		internal int BodyCount;
+		internal bool Resolved;
+	}
+
+	private static HitResolution _exactHitResolution;
+	private static HitResolution _nearestHitResolution;
+
 	private static bool TryResolveHitShadowBody(ShadowRig rig, Collider hitCollider, bool allowNearest, out ShadowBody resolvedBody)
+	{
+		if (rig == null || hitCollider == null)
+		{
+			resolvedBody = null;
+			return false;
+		}
+		ref HitResolution memo = ref (allowNearest ? ref _nearestHitResolution : ref _exactHitResolution);
+		int frame = Time.frameCount;
+		if (memo.Frame == frame && ReferenceEquals(memo.Rig, rig) && memo.Collider == hitCollider && memo.BodyCount == rig.Bodies.Count)
+		{
+			resolvedBody = memo.Body;
+			return memo.Resolved && resolvedBody?.Proxy != null;
+		}
+		bool resolved = ResolveHitShadowBody(rig, hitCollider, allowNearest, out resolvedBody);
+		memo = new HitResolution { Rig = rig, Collider = hitCollider, Body = resolvedBody, Frame = frame, BodyCount = rig.Bodies.Count, Resolved = resolved };
+		return resolved;
+	}
+
+	private static bool ResolveHitShadowBody(ShadowRig rig, Collider hitCollider, bool allowNearest, out ShadowBody resolvedBody)
 	{
 		resolvedBody = null;
 		if (rig == null || hitCollider == null)
@@ -1745,10 +1899,12 @@ internal static partial class ShadowRagdollWorld
 				continue;
 			}
 			if (TryAttachDetachedEffect(rig, effectRoot, sourcePosition, direction, initialDeathSpawn, eventSequence,
-				effectIndex, localEnvironmentOnly, transientShapes, completion))
+				effectIndex, out bool awaitingEnvironment, localEnvironmentOnly, transientShapes, completion))
 			{
 				return true;
 			}
+			// A settled owner's corridor is still being captured: the effect queues below and attaches when it lands.
+			if (awaitingEnvironment) break;
 			if (localEnvironmentOnly)
 			{
 				if (effectRoot != null) DestroyObject(effectRoot);
@@ -1867,9 +2023,10 @@ internal static partial class ShadowRagdollWorld
 	}
 
 	internal static bool TryApplyLocalDetachedGibPointImpulse(Collider hitCollider, Vector3 impulse,
-		Vector3 worldPoint, out string bodyName)
+		Vector3 worldPoint, out string bodyName, out bool awaitingEnvironment)
 	{
 		bodyName = null;
+		awaitingEnvironment = false;
 		if (!UsingExternalBackend || _externalRuntime == null || hitCollider == null ||
 			!IsFinite(impulse) || !IsFinite(worldPoint) || impulse.sqrMagnitude <= 0f)
 			return false;
@@ -1889,9 +2046,14 @@ internal static partial class ShadowRagdollWorld
 						(hitBody != native && !hitCollider.transform.IsChildOf(native.transform))) continue;
 					Vector3 center = simulation.worldCenterOfMass;
 					Vector3 sweepEnd = center + Vector3.ClampMagnitude(impulse, 2f);
-					if (!_externalRuntime.IsFullPrebake && !rig.EnvironmentAcquired &&
-						!TryAcquireEnvironment(rig, center, sweepEnd, out _, out _, out _)) return false;
 					if (_externalRuntime.IsFullPrebake) rig.EnvironmentAcquired = true;
+					else if (!rig.EnvironmentAcquired)
+					{
+						// The parked gib must not move before its geometry exists: the caller keeps the impulse and retries.
+						EnvironmentAcquisition acquisition = AcquireRigEnvironment(rig, ref rig.GibWake, center, sweepEnd, allowPending: true, out _);
+						if (acquisition == EnvironmentAcquisition.Pending) awaitingEnvironment = true;
+						if (acquisition != EnvironmentAcquisition.Acquired) return false;
+					}
 					simulation.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
 					simulation.isKinematic = false;
 					if (simulation is ExternalShadowBodyProxy external) external.ExternalBody.CollisionEnabled = true;
@@ -1935,7 +2097,13 @@ internal static partial class ShadowRagdollWorld
 		return true;
 	}
 
-	internal static bool WakeFromImpact(Corpse corpse, List<Corpse> awakenedCorpses)
+	/// <summary>
+	/// Wakes the settled corpse <paramref name="corpse"/> was shot on, plus every settled corpse resting against a woken one, and lists the woken corpses in <paramref name="awakenedCorpses"/>.
+	/// The corpse itself acquires its corridor synchronously unless <paramref name="deferPrimary"/> is set: its caller applies an impulse right after, and a grenade has no wait gate
+	/// like <see cref="IsAwaitingImpactWake"/>. A neighbor never carries an impulse, so one whose capture is still in flight waits in <see cref="PendingWakeRigs"/> instead of blocking.
+	/// <paramref name="traceShot"/> records the neighbor scan under <see cref="MainThreadStage.ShotPrepareNeighbors"/>.
+	/// </summary>
+	internal static bool WakeFromImpact(Corpse corpse, List<Corpse> awakenedCorpses, bool traceShot = false, bool deferPrimary = false)
 	{
 		awakenedCorpses?.Clear();
 		if (!Enabled || corpse == null || awakenedCorpses == null || IsHandoffHeld(corpse) || !RigsByCorpse.TryGetValue(corpse, out ShadowRig primary))
@@ -1950,26 +2118,78 @@ internal static partial class ShadowRagdollWorld
 		for (int queueIndex = 0; queueIndex < ImpactWakeQueue.Count; queueIndex++)
 		{
 			ShadowRig rig = ImpactWakeQueue[queueIndex];
-			if (!TryWakeFromImpact(rig))
+			if (!BeginWakeFromImpact(rig, allowPending: deferPrimary || queueIndex != 0, out bool wakePending))
 			{
+				if (wakePending && !PendingWakeRigs.Contains(rig)) PendingWakeRigs.Add(rig);
 				continue;
 			}
 			awakenedCorpses.Add(rig.Corpse);
-			foreach (ShadowRig candidate in Rigs)
+			using (TraceMainThread(MainThreadStage.ShotPrepareNeighbors, traceShot))
 			{
-				if (candidate?.Settled != true || candidate.Corpse == null || IsHandoffHeld(candidate.Corpse) || ImpactWakeVisited.Contains(candidate) ||
-					!AreNativeCollidersTouching(rig, candidate))
-				{
-					continue;
-				}
-				ImpactWakeVisited.Add(candidate);
-				ImpactWakeQueue.Add(candidate);
+				QueueTouchingSettledNeighbors(rig);
 			}
 		}
 
 		ImpactWakeQueue.Clear();
 		ImpactWakeVisited.Clear();
 		return awakenedCorpses.Count != 0;
+	}
+
+	/// <summary>
+	/// True while a post-mortem impact must wait before it reaches this corpse: the wake it triggers needs the environment of a settled
+	/// corpse (or of its parked independent weapon) and that capture is still in flight. The corpse stays parked and the caller retries
+	/// next frame; the wait ends after <see cref="WakeEnvironmentMaximumWaitSeconds"/> and the corridor is then acquired synchronously
+	/// here. False means the corridor is captured and bound, so the wake that follows extracts nothing. A corpse that is not settled, a
+	/// client-prediction peer, a held corpse and full-prebake raids never wait.
+	/// </summary>
+	internal static bool IsAwaitingImpactWake(Corpse corpse, bool independentWeapon)
+	{
+		if (!Enabled || corpse == null || !UsingExternalBackend || _externalRuntime.IsFullPrebake || RagdollCoordinator.IsRemoteClient ||
+			IsHandoffHeld(corpse) || !RigsByCorpse.TryGetValue(corpse, out ShadowRig rig))
+		{
+			return false;
+		}
+		if (independentWeapon)
+		{
+			ShadowBody weapon = rig.WeaponBody;
+			if (weapon?.Proxy == null || rig.EnvironmentAcquired) return false;
+			Vector3 weaponCenter = weapon.Proxy.worldCenterOfMass;
+			Vector3 weaponVelocity = IsFinite(weapon.Proxy.velocity) ? weapon.Proxy.velocity : Vector3.zero;
+			return AcquireRigEnvironment(rig, ref rig.WeaponWake, weaponCenter, weaponCenter + weaponVelocity * EnvironmentPredictionSeconds,
+				allowPending: true, out _) == EnvironmentAcquisition.Pending;
+		}
+		if (!rig.Settled || !RagdollCoordinator.ImpactReactivationEnabled) return false;
+		Vector3 center = CalculateCenter(rig);
+		if (IsCorridorCaptured(rig, center)) return false;
+		if (AcquireRigEnvironment(rig, ref rig.CorpseWake, center, CalculateEnvironmentSweepEnd(rig, center), allowPending: true, out _) !=
+			EnvironmentAcquisition.Pending)
+		{
+			return false;
+		}
+		rig.ImpactWaitFrame = Time.frameCount;
+		if (!PendingWakeRigs.Contains(rig)) PendingWakeRigs.Add(rig);
+		return true;
+	}
+
+	/// <summary>Retries the wakes that waited for an environment capture, so a neighbour or a moved-environment wake completes without another impact.</summary>
+	private static void ProcessPendingWakes()
+	{
+		float now = Time.realtimeSinceStartup;
+		for (int index = PendingWakeRigs.Count - 1; index >= 0; index--)
+		{
+			ShadowRig rig = PendingWakeRigs[index];
+			if (rig?.Corpse == null || !rig.Settled || rig.CorpseWake.StartedAt <= 0f || IsHandoffHeld(rig.Corpse) ||
+				now - rig.CorpseWake.StartedAt > WakeEnvironmentMaximumWaitSeconds * 4f ||
+				!RigsByCorpse.TryGetValue(rig.Corpse, out ShadowRig current) || !ReferenceEquals(current, rig))
+			{
+				PendingWakeRigs.RemoveAt(index);
+				continue;
+			}
+			// A shot that waits on this rig retries the wake itself, right before its own impulse; waking here as well would reactivate and announce the corpse twice.
+			if (rig.ImpactWaitFrame > 0 && Time.frameCount - rig.ImpactWaitFrame <= 1) continue;
+			RagdollCoordinator.ReactivateFromMovingEnvironment(rig.Corpse);
+			if (!rig.Settled || rig.CorpseWake.StartedAt <= 0f) PendingWakeRigs.RemoveAt(index);
+		}
 	}
 
 	internal static bool WakeFromNetwork(Corpse corpse)
@@ -2042,6 +2262,7 @@ internal static partial class ShadowRagdollWorld
 			return;
 		}
 
+		using var heavyStage = BeginHeavyStage();
 		try
 		{
 			if (weapon.isKinematic)
@@ -2074,7 +2295,8 @@ internal static partial class ShadowRagdollWorld
 			}
 			body.Native.collisionDetectionMode = CollisionDetectionMode.Discrete;
 			body.Native.isKinematic = true;
-			RupturePlugin.Log.LogInfo($"Late native weapon joined shadow physics independently for {GetCorpseName(ragdoll)}; the corpse hand joint was removed; geometry={DescribeWeaponGeometry(body)}.");
+			if (RupturePlugin.Log.IsDebugEnabled)
+				RupturePlugin.Log.LogInfo($"Late native weapon joined shadow physics independently for {GetCorpseName(ragdoll)}; the corpse hand joint was removed; geometry={DescribeWeaponGeometry(body)}.");
 		}
 		catch (Exception exception)
 		{
@@ -2246,7 +2468,7 @@ internal static partial class ShadowRagdollWorld
 			$"independentWeaponLifecycle=slept:{_independentWeaponSleepCount}/woke:{_independentWeaponWakeCount}/environmentReacquired:{_independentWeaponEnvironmentReacquireCount}, " +
 			$"poseSnapshots=sent:{snapshotsSent}/received:{snapshotsReceived}/rejected:{snapshotsRejected}/applied:{snapshotsApplied}/chunks:{snapshotChunksSent}:{snapshotChunksReceived}/incompleteDiscarded:{incompleteSnapshotsDiscarded}/sendFailures:{snapshotSendFailures}, " +
 			$"authorityPlayback=queued:{playbackQueued}/active:{playbackActive}/frames:{playbackFrames}/predictedEchoes:{predictedEchoes}/backlogDiscarded:{playbackBacklogFramesDiscarded}/fastForwards:{playbackTimelineFastForwards}/waitingForCorpse:{playbackWaitingForCorpse}/waitingForLifecycle:{playbackWaitingForLifecycle}, " +
-			$"environmentWakes={_environmentWakeCount}, deferredProximityRefreshes={_deferredProximityRefreshes}, " +
+			$"environmentWakes={_environmentWakeCount}, deferredProximityRefreshes={_deferredProximityRefreshes}, environmentAcquisition=async:{_environmentAsyncAcquisitions}/syncFallbacks:{_environmentSyncFallbacks}/syncDirect:{_environmentSyncDirect}, " +
 			$"corpseCollisionLayer={DescribeCorpseCollisionLayer()}, corpseCollisionColliders={_corpseCollisionColliderCount}, " +
 			$"builds={_successfulBuilds}, failures={_buildFailures}, " +
 			$"impactReactivation={RagdollCoordinator.ImpactReactivationEnabled}, currentlyEnabledSettled={_enabledSettledRigs}/{_enabledSettledBodies}, " +
@@ -2405,6 +2627,27 @@ internal static partial class ShadowRagdollWorld
 		return samples[Math.Max(0, index)];
 	}
 
+	private static int _heavyStageDepth;
+	private static long _heavyStageStarted;
+
+	/// <summary>
+	/// Opens a heavy main-thread stage (ragdoll build, environment acquisition, late weapon adoption) that is charged to
+	/// <see cref="FrameWorkBudget"/> when the outermost scope closes. A build that acquires its environment is charged once.
+	/// </summary>
+	private static HeavyStageScope BeginHeavyStage()
+	{
+		if (_heavyStageDepth++ == 0) _heavyStageStarted = Stopwatch.GetTimestamp();
+		return default;
+	}
+
+	private readonly struct HeavyStageScope : IDisposable
+	{
+		public void Dispose()
+		{
+			if (--_heavyStageDepth == 0) FrameWorkBudget.RecordHeavyStage(Stopwatch.GetTimestamp() - _heavyStageStarted);
+		}
+	}
+
 	private static void ProcessPendingBuilds()
 	{
 		for (int index = PendingBuilds.Count - 1; index >= 0; index--)
@@ -2413,6 +2656,7 @@ internal static partial class ShadowRagdollWorld
 			if (pending.Ragdoll == null || pending.Ragdoll._owner == null)
 			{
 				PendingBuilds.RemoveAt(index);
+				CorpseWeaponCollisionFilter.ApplyDeferred(pending.Ragdoll);
 				continue;
 			}
 			if (Time.frameCount < pending.EarliestFrame)
@@ -2423,15 +2667,29 @@ internal static partial class ShadowRagdollWorld
 			{
 				continue;
 			}
+			float now = Time.realtimeSinceStartup;
+			// The native ragdoll keeps simulating while its environment prefetch finishes; the wait is bounded.
+			if (ShouldWaitForPrefetch(pending, now)) continue;
 			PendingBuilds.RemoveAt(index);
 			// Every native restart re-schedules; a ragdoll that stopped again before
-			// this frame has nothing to hand off and is not a construction failure.
-			if (pending.Ragdoll._isPhysicsDone) continue;
-			if (!TryBuild(pending.Ragdoll, out string failure))
+			// this frame has nothing to hand off and is not a construction failure. It keeps its native weapon joint, so a deferred ignore applies.
+			if (pending.Ragdoll._isPhysicsDone)
+			{
+				CancelCorpsePrefetch(pending.Ragdoll);
+				CorpseWeaponCollisionFilter.ApplyDeferred(pending.Ragdoll);
+				continue;
+			}
+			bool built;
+			string failure;
+			double prefetchWaitMilliseconds = pending.PrefetchWaitStartedAt > 0f ? (now - pending.PrefetchWaitStartedAt) * 1000d : 0d;
+			using (BeginHeavyStage()) built = TryBuild(pending.Ragdoll, prefetchWaitMilliseconds, out failure);
+			CancelCorpsePrefetch(pending.Ragdoll);
+			if (!built)
 			{
 				LethalImpulseExperiment.Admission(pending.Ragdoll, false);
 				_buildFailures++;
 				ApplyPendingColliderDisableToNative(pending.Ragdoll);
+				CorpseWeaponCollisionFilter.ApplyDeferred(pending.Ragdoll);
 				RupturePlugin.Log.LogWarning($"Shadow ragdoll was not installed for {GetCorpseName(pending.Ragdoll)}; EFT native physics remains active. {failure}");
 			}
 			else LethalImpulseExperiment.Admission(pending.Ragdoll, true);
@@ -2465,13 +2723,14 @@ internal static partial class ShadowRagdollWorld
 					break;
 				}
 			}
-			if (matchingRig != null && TryAttachDetachedEffect(matchingRig, pending.Root, pending.SourcePosition, pending.Direction,
-				pending.InitialDeathSpawn, pending.EventSequence, pending.EffectIndex, pending.LocalEnvironmentOnly,
-				pending.TransientShapes, pending.Completion))
+			if (matchingRig == null) continue;
+			if (TryAttachDetachedEffect(matchingRig, pending.Root, pending.SourcePosition, pending.Direction,
+				pending.InitialDeathSpawn, pending.EventSequence, pending.EffectIndex, out bool awaitingEnvironment,
+				pending.LocalEnvironmentOnly, pending.TransientShapes, pending.Completion))
 			{
 				PendingDetachedEffects.RemoveAt(index);
 			}
-			else if (matchingRig != null && pending.LocalEnvironmentOnly)
+			else if (pending.LocalEnvironmentOnly && !awaitingEnvironment)
 			{
 				if (pending.Root != null) DestroyObject(pending.Root);
 				pending.Completion?.Invoke(false, "local gib could not begin shadow-scene attachment");
@@ -2532,27 +2791,48 @@ internal static partial class ShadowRagdollWorld
 				}
 			pending.Rig.DetachedEffects.Add(pending.Detached);
 			if (pending.Rig.Dormant) Wake(pending.Rig);
-			RupturePlugin.Log.LogInfo($"Detached gore joined shadow ragdoll asynchronously: source={(pending.Detached.InitialDeathSpawn ? "initial-death" : "post-mortem")}, " +
-				$"asset={pending.Detached.Root.name}, renderers={pending.EnabledRenderers}/{pending.TotalRenderers}, " +
-				$"bodies=1, colliders={pending.Colliders.Length}, spawn={pending.Detached.SpawnPosition}, " +
-				$"launchSpeed={pending.LaunchVelocity.magnitude:F2}m/s, capturedSpeed={simulationBody.velocity.magnitude:F2}m/s, " +
-				$"externalWorkerMs={pending.Creation.WorkerMilliseconds:F3}, externalEndToEndMs={TicksToMilliseconds(Stopwatch.GetTimestamp() - pending.EnqueuedAt):F3}, " +
-				"ccd=continuous, transientConvex=true.");
+			if (RupturePlugin.Log.IsDebugEnabled)
+			{
+				RupturePlugin.Log.LogInfo($"Detached gore joined shadow ragdoll asynchronously: source={(pending.Detached.InitialDeathSpawn ? "initial-death" : "post-mortem")}, " +
+					$"asset={pending.Detached.Root.name}, renderers={pending.EnabledRenderers}/{pending.TotalRenderers}, " +
+					$"bodies=1, colliders={pending.Colliders.Length}, spawn={pending.Detached.SpawnPosition}, " +
+					$"launchSpeed={pending.LaunchVelocity.magnitude:F2}m/s, capturedSpeed={simulationBody.velocity.magnitude:F2}m/s, " +
+					$"externalWorkerMs={pending.Creation.WorkerMilliseconds:F3}, externalEndToEndMs={TicksToMilliseconds(Stopwatch.GetTimestamp() - pending.EnqueuedAt):F3}, " +
+					"ccd=continuous, transientConvex=true.");
+			}
 			pending.Completion?.Invoke(true, null);
 		}
 	}
 
 	private static bool TryAttachDetachedEffect(ShadowRig rig, GameObject effectRoot, Vector3 sourcePosition, Vector3 direction,
-		bool initialDeathSpawn, uint eventSequence, byte effectIndex, bool localEnvironmentOnly = false,
+		bool initialDeathSpawn, uint eventSequence, byte effectIndex, out bool awaitingEnvironment, bool localEnvironmentOnly = false,
 		ExternalTransientConvexShape[] transientShapes = null, Action<bool, string> completion = null)
 	{
+		awaitingEnvironment = false;
 		if (rig == null || effectRoot == null || !UsingExternalBackend)
 		{
 			completion?.Invoke(false, "shadow rig or external backend is unavailable");
 			return false;
 		}
-		DetachedEffect detached = null;
 		bool settledEnvironmentAcquired = false;
+		if (rig.Settled && !_externalRuntime.IsFullPrebake)
+		{
+			// Before anything is enabled: the shell stays parked until the corridor it lands in is captured, then the owner is asked again next frame.
+			switch (AcquireRigEnvironment(rig, ref rig.GibWake, rig.EnvironmentCenter, sourcePosition, allowPending: true, out string environmentFailure))
+			{
+			case EnvironmentAcquisition.Pending:
+				awaitingEnvironment = true;
+				return false;
+			case EnvironmentAcquisition.Failed:
+				string message = "InvalidOperationException: detached effect environment could not be acquired: " + environmentFailure;
+				RupturePlugin.Log.LogWarning("Detached gore could not join the shadow scene: " + message);
+				if (localEnvironmentOnly) DestroyObject(effectRoot);
+				completion?.Invoke(false, message);
+				return false;
+			}
+			settledEnvironmentAcquired = true;
+		}
+		DetachedEffect detached = null;
 		try
 		{
 			effectRoot.SetActive(true);
@@ -2568,15 +2848,6 @@ internal static partial class ShadowRagdollWorld
 				}
 				renderer.enabled = renderDetachedEffect;
 				if (renderDetachedEffect) enabledRenderers++;
-			}
-			if (rig.Settled && !_externalRuntime.IsFullPrebake)
-			{
-				Vector3 environmentCenter = rig.EnvironmentCenter;
-				if (!TryAcquireEnvironment(rig, environmentCenter, sourcePosition, out string environmentFailure, out _, out _))
-				{
-					throw new InvalidOperationException("detached effect environment could not be acquired: " + environmentFailure);
-				}
-				settledEnvironmentAcquired = true;
 			}
 			Rigidbody[] bodies = effectRoot.GetComponentsInChildren<Rigidbody>(includeInactive: true);
 			if (bodies.Length == 0 && effectRoot.GetComponentInChildren<Collider>(includeInactive: true) != null)
@@ -2757,13 +3028,16 @@ internal static partial class ShadowRagdollWorld
 			{
 				Wake(rig);
 			}
-			RupturePlugin.Log.LogInfo($"Detached gore joined shadow ragdoll for {GetCorpseName(rig.NativeRagdoll)}: source={(initialDeathSpawn ? "initial-death" : "post-mortem")}, " +
-				$"asset={effectRoot.name}, active={effectRoot.activeInHierarchy}, renderers={enabledRenderers}/{effectRenderers.Length}, " +
-				$"bodies={detached.Bodies.Count}, colliders={effectColliders.Length}, spawn={sourcePosition}, " +
-				$"capturedBodyPose={(detached.SimulationBodies.Count > 0 ? detached.SimulationBodies[0].position.ToString() : "none")}, " +
-				$"launchSpeed={launchVelocity.magnitude:F2}m/s, " +
-				$"capturedSpeed={(detached.SimulationBodies.Count > 0 ? detached.SimulationBodies[0].velocity.magnitude.ToString("F2") : "none")}m/s, " +
-				$"ccd=continuous, settledOwner={rig.Settled}.");
+			if (RupturePlugin.Log.IsDebugEnabled)
+			{
+				RupturePlugin.Log.LogInfo($"Detached gore joined shadow ragdoll for {GetCorpseName(rig.NativeRagdoll)}: source={(initialDeathSpawn ? "initial-death" : "post-mortem")}, " +
+					$"asset={effectRoot.name}, active={effectRoot.activeInHierarchy}, renderers={enabledRenderers}/{effectRenderers.Length}, " +
+					$"bodies={detached.Bodies.Count}, colliders={effectColliders.Length}, spawn={sourcePosition}, " +
+					$"capturedBodyPose={(detached.SimulationBodies.Count > 0 ? detached.SimulationBodies[0].position.ToString() : "none")}, " +
+					$"launchSpeed={launchVelocity.magnitude:F2}m/s, " +
+					$"capturedSpeed={(detached.SimulationBodies.Count > 0 ? detached.SimulationBodies[0].velocity.magnitude.ToString("F2") : "none")}m/s, " +
+					$"ccd=continuous, settledOwner={rig.Settled}.");
+			}
 			return true;
 		}
 		catch (Exception exception)
@@ -2868,12 +3142,29 @@ internal static partial class ShadowRagdollWorld
 	private static int CountAwakeIndependentBodies(ShadowRig rig)
 	{
 		int count = CountDynamicDetachedBodies(rig);
-		if (rig?.WeaponBody?.Proxy != null && !rig.WeaponBody.Proxy.isKinematic &&
-			(!rig.WeaponSleeping || !rig.WeaponBody.Proxy.IsSleeping()))
+		if (HasAwakeIndependentWeapon(rig))
 		{
 			count++;
 		}
 		return count;
+	}
+
+	private static bool HasAwakeIndependentWeapon(ShadowRig rig)
+	{
+		return rig?.WeaponBody?.Proxy != null && !rig.WeaponBody.Proxy.isKinematic &&
+			(!rig.WeaponSleeping || !rig.WeaponBody.Proxy.IsSleeping());
+	}
+
+	/// <summary>
+	/// True when nothing in the rig can move, so its environment corridor needs no probing: a settled or dormant rig with no
+	/// awake independent body, or an active rig whose bodies all slept through the last completed step. Waking resets
+	/// <see cref="ShadowRig.SleepingSteps"/> or flips the rig out of those states, which resumes probing on the next refresh.
+	/// </summary>
+	private static bool IsEnvironmentProbeIdle(ShadowRig rig)
+	{
+		return rig.Active
+			? rig.SleepingSteps > 0 && !HasAwakeIndependentWeapon(rig)
+			: CountAwakeIndependentBodies(rig) == 0;
 	}
 
 	private static bool HasDynamicIndependentWeapon(ShadowRig rig)
@@ -2913,7 +3204,7 @@ internal static partial class ShadowRagdollWorld
 		return count;
 	}
 
-	private static bool TryBuild(EFT.Interactive.CorpseRagdoll ragdoll, out string failure)
+	private static bool TryBuild(EFT.Interactive.CorpseRagdoll ragdoll, double prefetchWaitMilliseconds, out string failure)
 	{
 		failure = null;
 		if (!Enabled)
@@ -2953,42 +3244,39 @@ internal static partial class ShadowRagdollWorld
 		};
 		uint refreshIdentity = rig.ExternalGroup;
 		rig.NextEnvironmentRefreshFrame = Time.frameCount + 1 + (int)((refreshIdentity * 17u) % ProximityEnvironmentRefreshIntervalFrames);
+		// Debug diagnostics only: the geometry counters are snapshotted around the build and formatted once, after it.
+		bool debugLogging = RupturePlugin.Log.IsDebugEnabled;
+		IExternalBuildDiagnosticsRuntime buildDiagnostics = debugLogging ? _externalRuntime as IExternalBuildDiagnosticsRuntime : null;
+		ExternalBuildCounters countersBefore = buildDiagnostics != null ? buildDiagnostics.ReadBuildCounters() : default;
 		try
 		{
 			double phaseStartedAt = stopwatch.Elapsed.TotalMilliseconds;
 			rig.Root = new GameObject($"RPT Shadow {corpse.PlayerProfileID ?? "corpse"}");
 			rig.Root.SetActive(false);
-			Transform skeletonRoot = ragdoll._playerBody?.SkeletonRootJoint?.transform;
-			foreach (RigidbodySpawner spawner in ragdoll._rigidbodySpawners)
+			rig.HandsWeaponRoot = ResolveHandsWeaponRoot(corpse, ragdoll);
+			bool created;
+			double bodyBuildMilliseconds;
+			// One owner transaction for every bone body and joint; no native handle is touched until the scope closes. A failure
+			// inside the scope abandons the batch, so its queued creation never runs and nothing can replace the original error.
+			using (IExternalCreationBatch batch = OpenCreationBatch())
 			{
-				Rigidbody nativeBody = spawner?.Rigidbody;
-				if (nativeBody == null || nativeBody.isKinematic)
+				try
 				{
-					failure = "a required native ragdoll body is missing or already kinematic";
-					DestroyRig(rig, restoreNative: false);
-					return false;
+					created = TryCreateBodies(rig, ragdoll, out failure);
+					bodyBuildMilliseconds = stopwatch.Elapsed.TotalMilliseconds - phaseStartedAt;
+					phaseStartedAt = stopwatch.Elapsed.TotalMilliseconds;
+					created = created && TryCloneJoints(rig, out failure);
 				}
-				if (!TryAddCoreBody(rig, spawner, nativeBody, skeletonRoot, out failure))
+				catch
 				{
-					DestroyRig(rig, restoreNative: false);
-					return false;
+					batch?.Abandon();
+					throw;
 				}
+				if (!created) batch?.Abandon();
 			}
-
-			Rigidbody weapon = ragdoll.WeaponRigidbody;
-			if (weapon != null && !rig.BodiesByNative.ContainsKey(weapon))
-			{
-				if (weapon.isKinematic || !TryCreateBody(rig, weapon, WeaponPath, countsForSleep: false, out failure))
-				{
-					failure = failure ?? "the attached weapon rigidbody is already kinematic";
-					DestroyRig(rig, restoreNative: false);
-					return false;
-				}
-			}
-			double bodyBuildMilliseconds = stopwatch.Elapsed.TotalMilliseconds - phaseStartedAt;
-			phaseStartedAt = stopwatch.Elapsed.TotalMilliseconds;
-
-			if (!TryCloneJoints(rig, out failure))
+			// The weapon is created after the batch so its box fallback can still engage; see TryCreateWeaponBody.
+			created = created && TryCreateWeaponBody(rig, ragdoll, out failure);
+			if (!created)
 			{
 				DestroyRig(rig, restoreNative: false);
 				return false;
@@ -3004,8 +3292,21 @@ internal static partial class ShadowRagdollWorld
 			Vector3 sweepEnd = CalculateEnvironmentSweepEnd(rig, center);
 			int environmentCreated = 0;
 			int environmentReused = 0;
+			ExternalEnvironmentPrefetchState prefetchState = ExternalEnvironmentPrefetchState.None;
+			Vector3 acquireCenter = center;
+			Vector3 acquireSweepEnd = sweepEnd;
+			if (!_externalRuntime.IsFullPrebake)
+			{
+				prefetchState = PromoteCorpsePrefetch(corpse, rig.ExternalGroup, out Vector3 prefetchCenter, out Vector3 prefetchSweepEnd);
+				// A ready prefetch captured exactly the corridor it requested; acquiring that one instead of a near neighbour makes the acquisition a pure reuse.
+				if (prefetchState == ExternalEnvironmentPrefetchState.Ready && CorridorCovers(center, prefetchCenter, prefetchSweepEnd))
+				{
+					acquireCenter = prefetchCenter;
+					acquireSweepEnd = prefetchSweepEnd;
+				}
+			}
 			if (!_externalRuntime.IsFullPrebake &&
-				!TryAcquireEnvironment(rig, center, sweepEnd, out failure, out environmentCreated, out environmentReused))
+				!TryAcquireEnvironment(rig, acquireCenter, acquireSweepEnd, out failure, out environmentCreated, out environmentReused))
 			{
 				DestroyRig(rig, restoreNative: false);
 				return false;
@@ -3054,13 +3355,23 @@ internal static partial class ShadowRagdollWorld
 			RagdollCoordinator.SendPoseSnapshot(rig.Corpse, force: true);
 			stopwatch.Stop();
 			double handoffMilliseconds = stopwatch.Elapsed.TotalMilliseconds - phaseStartedAt;
-			int bodyColliderCount = 0;
-			foreach (ShadowBody body in rig.Bodies) bodyColliderCount += body.NativeColliders.Count;
-			RupturePlugin.Log.LogInfo($"Shadow ragdoll active for {GetCorpseName(ragdoll)}: bodies={rig.Bodies.Count}, bodyColliders={bodyColliderCount}, " +
-				$"environmentCreated={environmentCreated}, environmentReused={environmentReused}, " +
-				$"weaponGeometry={DescribeWeaponGeometry(rig.WeaponBody)}, " +
-				$"buildMs={stopwatch.Elapsed.TotalMilliseconds:F2} (bodies={bodyBuildMilliseconds:F2}, joints={jointBuildMilliseconds:F2}, " +
-				$"environment={environmentBuildMilliseconds:F2}, handoff={handoffMilliseconds:F2}, clientPrediction={RagdollCoordinator.IsRemoteClient}).");
+			if (debugLogging)
+			{
+				int bodyColliderCount = 0;
+				int simulatedColliderCount = 0;
+				foreach (ShadowBody body in rig.Bodies)
+				{
+					bodyColliderCount += body.NativeColliders.Count;
+					simulatedColliderCount += body.SimulatedColliders.Count;
+				}
+				string geometry = buildDiagnostics == null ? "unavailable" : DescribeBuildCounters(buildDiagnostics.ReadBuildCounters().Since(countersBefore));
+				RupturePlugin.Log.LogInfo($"Shadow ragdoll active for {GetCorpseName(ragdoll)}: bodies={rig.Bodies.Count}, bodyColliders={bodyColliderCount}, simulatedColliders={simulatedColliderCount}, " +
+					$"skippedColliders=(trigger:{rig.SkippedTriggerColliders}, inactive:{rig.SkippedInactiveColliders}, foreignBody:{rig.SkippedForeignBodyColliders}, weapon:{rig.SkippedWeaponColliders}), " +
+					$"environmentCreated={environmentCreated}, environmentReused={environmentReused}, prefetch={prefetchState}, buildWaitMs={prefetchWaitMilliseconds:F1}, " +
+					$"weaponGeometry={DescribeWeaponGeometry(rig.WeaponBody)}, geometryWork=({geometry}), " +
+					$"buildMs={stopwatch.Elapsed.TotalMilliseconds:F2} (bodies={bodyBuildMilliseconds:F2}, joints={jointBuildMilliseconds:F2}, " +
+					$"environment={environmentBuildMilliseconds:F2}, handoff={handoffMilliseconds:F2}, clientPrediction={RagdollCoordinator.IsRemoteClient}).");
+			}
 			return true;
 		}
 		catch (Exception exception)
@@ -3079,6 +3390,43 @@ internal static partial class ShadowRagdollWorld
 			}
 			return false;
 		}
+	}
+
+	/// <summary>Creates the core bodies of a corpse rig inside the open creation batch. A failure leaves the partial rig to the caller, which destroys it after abandoning the batch.</summary>
+	private static bool TryCreateBodies(ShadowRig rig, EFT.Interactive.CorpseRagdoll ragdoll, out string failure)
+	{
+		failure = null;
+		Transform skeletonRoot = ragdoll._playerBody?.SkeletonRootJoint?.transform;
+		foreach (RigidbodySpawner spawner in ragdoll._rigidbodySpawners)
+		{
+			Rigidbody nativeBody = spawner?.Rigidbody;
+			if (nativeBody == null || nativeBody.isKinematic)
+			{
+				failure = "a required native ragdoll body is missing or already kinematic";
+				return false;
+			}
+			if (!TryAddCoreBody(rig, spawner, nativeBody, skeletonRoot, out failure)) return false;
+		}
+
+		return true;
+	}
+
+	/// <summary>
+	/// Creates the attached weapon's body. It runs after the creation batch has closed, with its own owner round trip, because
+	/// its procedural rounded box is cooked on the owner: a failed cook must make this call return false so the caller's fitted-box
+	/// fallback still applies, instead of rolling back the whole batch of bone bodies and joints.
+	/// </summary>
+	private static bool TryCreateWeaponBody(ShadowRig rig, EFT.Interactive.CorpseRagdoll ragdoll, out string failure)
+	{
+		failure = null;
+		Rigidbody weapon = ragdoll.WeaponRigidbody;
+		if (weapon == null || rig.BodiesByNative.ContainsKey(weapon)) return true;
+		if (weapon.isKinematic || !TryCreateBody(rig, weapon, WeaponPath, countsForSleep: false, out failure))
+		{
+			failure = failure ?? "the attached weapon rigidbody is already kinematic";
+			return false;
+		}
+		return true;
 	}
 
 	private static bool TryAddCoreBody(ShadowRig rig, RigidbodySpawner spawner, Rigidbody nativeBody, Transform skeletonRoot, out string failure)
@@ -3133,6 +3481,13 @@ internal static partial class ShadowRagdollWorld
 			failure = $"ragdoll body {path} has no attached colliders";
 			return false;
 		}
+		// Bone bodies capture only what Unity simulates; the weapon keeps its structural set and its own box fit.
+		List<Collider> simulatedColliders = attachedColliders;
+		if (!isWeapon && !removed)
+		{
+			simulatedColliders = rig.SimulatedScratch;
+			GetSimulatedBodyColliders(rig, nativeBody, attachedColliders, simulatedColliders);
+		}
 		ExternalBoxShape weaponBox = default;
 		if (isWeapon && !TryBuildWeaponBox(nativeBody, attachedColliders, GetCorpseName(rig.NativeRagdoll), out weaponBox, out failure))
 		{
@@ -3162,11 +3517,12 @@ internal static partial class ShadowRagdollWorld
 		{
 			// Preserve native core indices for corpse pose replication, but known
 			// missing anatomy needs neither collision geometry nor a dynamic actor.
-			created = _externalRuntime.TryCreateBody(nativeBody, removed ? Array.Empty<Collider>() : (IReadOnlyList<Collider>)attachedColliders,
+			created = _externalRuntime.TryCreateBody(nativeBody, removed ? Array.Empty<Collider>() : (IReadOnlyList<Collider>)simulatedColliders,
 				rig.ExternalGroup, kinematic: removed, out externalBody, out failure);
 		}
 		if (!created)
 		{
+			rig.SimulatedScratch.Clear();
 			return false;
 		}
 		ShadowBody external = new ShadowBody
@@ -3191,6 +3547,8 @@ internal static partial class ShadowRagdollWorld
 		};
 		if (isWeapon) external.Proxy.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
 		external.NativeColliders.AddRange(attachedColliders);
+		if (!isWeapon && !removed) external.SimulatedColliders.AddRange(simulatedColliders);
+		rig.SimulatedScratch.Clear();
 		rig.Bodies.Add(external);
 		rig.BodiesByNative[nativeBody] = external;
 		if (removed) rig.PermanentlyDisabledBodies.Add(external);
@@ -3198,21 +3556,39 @@ internal static partial class ShadowRagdollWorld
 		return true;
 	}
 
+	/// <summary>Main-thread scratch for weapon fitting; one weapon body is fitted at a time, so these replace three allocating component queries and a list.</summary>
+	private static readonly List<Transform> WeaponExcludedRootScratch = new List<Transform>(32);
+	private static readonly List<EFT.MagazineInHandsVisualController> MagazineInHandsScratch = new List<EFT.MagazineInHandsVisualController>(4);
+	private static readonly List<MagVisualController> MagVisualScratch = new List<MagVisualController>(4);
+	private static readonly List<EFT.AssetsManager.AmmoPoolObject> AmmoPoolScratch = new List<EFT.AssetsManager.AmmoPoolObject>(32);
+
 	private static bool TryBuildWeaponBox(Rigidbody body, IReadOnlyList<Collider> sourceColliders, string profile, out ExternalBoxShape box, out string failure)
+	{
+		try { return BuildWeaponBox(body, sourceColliders, profile, out box, out failure); }
+		finally
+		{
+			WeaponExcludedRootScratch.Clear();
+			MagazineInHandsScratch.Clear();
+			MagVisualScratch.Clear();
+			AmmoPoolScratch.Clear();
+		}
+	}
+
+	private static bool BuildWeaponBox(Rigidbody body, IReadOnlyList<Collider> sourceColliders, string profile, out ExternalBoxShape box, out string failure)
 	{
 		box = default;
 		failure = null;
 		// EFT marks magazine asset roots independently of their current reload
 		// parent. Their animated offsets must not enlarge the weapon's fixed box.
-		List<Transform> excludedRoots = new List<Transform>();
-		foreach (EFT.MagazineInHandsVisualController magazine in body.GetComponentsInChildren<EFT.MagazineInHandsVisualController>(true))
-			excludedRoots.Add(magazine.transform);
-		foreach (MagVisualController magazine in body.GetComponentsInChildren<MagVisualController>(true))
-			excludedRoots.Add(magazine.transform);
+		List<Transform> excludedRoots = WeaponExcludedRootScratch;
+		body.GetComponentsInChildren(true, MagazineInHandsScratch);
+		for (int index = 0; index < MagazineInHandsScratch.Count; index++) excludedRoots.Add(MagazineInHandsScratch[index].transform);
+		body.GetComponentsInChildren(true, MagVisualScratch);
+		for (int index = 0; index < MagVisualScratch.Count; index++) excludedRoots.Add(MagVisualScratch[index].transform);
 		// Native DropItemDead omits Shells colliders. Headless cartridge visibility
 		// patches can leave these pooled reload/ejection objects in a different pose.
-		foreach (EFT.AssetsManager.AmmoPoolObject ammo in body.GetComponentsInChildren<EFT.AssetsManager.AmmoPoolObject>(true))
-			excludedRoots.Add(ammo.transform);
+		body.GetComponentsInChildren(true, AmmoPoolScratch);
+		for (int index = 0; index < AmmoPoolScratch.Count; index++) excludedRoots.Add(AmmoPoolScratch[index].transform);
 		int shellsLayer = LayerMask.NameToLayer("Shells");
 		bool fitted = WeaponColliderGeometry.TryFitOriented(body, sourceColliders, out var fit, excludedRoots, shellsLayer);
 		Bounds bounds = new Bounds(fit.Center, fit.Size);
@@ -3225,8 +3601,9 @@ internal static partial class ShadowRagdollWorld
 		Vector3 size = bounds.size;
 		PhysicMaterial material = null;
 		float contactOffset = 0.01f;
-		foreach (Collider collider in sourceColliders)
+		for (int colliderIndex = 0; colliderIndex < sourceColliders.Count; colliderIndex++)
 		{
+			Collider collider = sourceColliders[colliderIndex];
 			if (collider == null || collider.isTrigger || collider.GetComponentInParent<Rigidbody>(true) != body) continue;
 			if (collider.gameObject.layer == shellsLayer || WeaponColliderGeometry.IsExcluded(collider.transform, excludedRoots)) continue;
 			if (material == null) material = collider.sharedMaterial;
@@ -3347,7 +3724,7 @@ internal static partial class ShadowRagdollWorld
 			Vector3 center = weapon.Proxy.worldCenterOfMass;
 			Vector3 velocity = IsFinite(weapon.Proxy.velocity) ? weapon.Proxy.velocity : Vector3.zero;
 			Vector3 sweepEnd = center + velocity * EnvironmentPredictionSeconds;
-			if (!TryAcquireEnvironment(rig, center, sweepEnd, out failure, out _, out _))
+			if (AcquireRigEnvironment(rig, ref rig.WeaponWake, center, sweepEnd, allowPending: false, out failure) != EnvironmentAcquisition.Acquired)
 			{
 				return false;
 			}
@@ -3390,8 +3767,8 @@ internal static partial class ShadowRagdollWorld
 			{
 				Joint = externalJoint,
 				NativeJoint = nativeJoint,
-				AdmissionRelativeRotation = connectedBody?.Proxy == null ? body.Proxy.rotation :
-					Quaternion.Inverse(connectedBody.Proxy.rotation) * body.Proxy.rotation,
+				AdmissionRelativeRotation = connectedBody?.Proxy == null ? body.InitialRotation :
+					Quaternion.Inverse(connectedBody.InitialRotation) * body.InitialRotation,
 				Body = body,
 				ConnectedBody = connectedBody
 			});
@@ -3432,9 +3809,9 @@ internal static partial class ShadowRagdollWorld
 				{
 					continue;
 				}
-				foreach (Collider left in leftBody.NativeColliders)
+				foreach (Collider left in leftBody.SimulatedColliders)
 				{
-					foreach (Collider right in rightBody.NativeColliders)
+					foreach (Collider right in rightBody.SimulatedColliders)
 					{
 						if (left == null || right == null || left == right ||
 							(!PhysicsExtensions.GetIgnoreCollision(left, right) && !Physics.GetIgnoreCollision(left, right)))
@@ -3450,6 +3827,7 @@ internal static partial class ShadowRagdollWorld
 
 	private static bool TryAcquireEnvironment(ShadowRig rig, Vector3 center, Vector3 sweepEnd, out string failure, out int created, out int reused)
 	{
+		using var heavyStage = BeginHeavyStage();
 		if (!_externalRuntime.EnsureEnvironment(rig.ExternalGroup, center, sweepEnd, out ExternalEnvironmentAcquireResult result, out failure))
 		{
 			created = 0;
@@ -3463,6 +3841,9 @@ internal static partial class ShadowRagdollWorld
 		rig.EnvironmentAcquired = true;
 		return true;
 	}
+
+	/// <summary>Opens the backend's creation batch so body and joint creation costs one owner transaction; null when the backend has none.</summary>
+	private static IExternalCreationBatch OpenCreationBatch() => (_externalRuntime as IExternalCreationBatchRuntime)?.BeginCreationBatch();
 
 	private static void ConfigureCorpseCollision(Collider collider, int deadbodyLayer)
 	{
@@ -3514,6 +3895,11 @@ internal static partial class ShadowRagdollWorld
 		{
 			return true;
 		}
+		RigPrefetchAction prefetchAction = fullPrebake ? RigPrefetchAction.Acquire : EvaluateRigPrefetch(rig, center, sweepEnd);
+		if (prefetchAction == RigPrefetchAction.Wait)
+		{
+			return true;
+		}
 		if (!fullPrebake && !TryReserveProximityAcquire())
 		{
 			// Preserve the existing corridor for one more frame. Its two-metre radius
@@ -3522,6 +3908,17 @@ internal static partial class ShadowRagdollWorld
 			rig.NextEnvironmentRefreshFrame = Time.frameCount + 1;
 			_deferredProximityRefreshes++;
 			return true;
+		}
+		if (prefetchAction == RigPrefetchAction.PromoteThenAcquire)
+		{
+			// The backend captured exactly the corridor it was asked for; acquiring that one, not the near neighbour the rig moved to, only reuses.
+			center = rig.PrefetchCenter;
+			sweepEnd = rig.PrefetchSweepEnd;
+			PromoteRigPrefetch(rig);
+		}
+		else if (PrefetchRuntime != null)
+		{
+			_environmentSyncFallbacks++;
 		}
 		if (TryAcquireEnvironment(rig, center, sweepEnd, out string failure, out _, out _))
 		{
@@ -3664,7 +4061,8 @@ internal static partial class ShadowRagdollWorld
 			{
 				RagdollCoordinator.SendShadowWake(rig.Corpse);
 			}
-			RupturePlugin.Log.LogInfo($"Shadow ragdoll{(independentWeaponWoke && !reactivated ? " weapon" : string.Empty)} woke for {GetCorpseName(rig.NativeRagdoll)} after contact with moved external environment geometry.");
+			if (RupturePlugin.Log.IsDebugEnabled)
+				RupturePlugin.Log.LogInfo($"Shadow ragdoll{(independentWeaponWoke && !reactivated ? " weapon" : string.Empty)} woke for {GetCorpseName(rig.NativeRagdoll)} after contact with moved external environment geometry.");
 		}
 	}
 
@@ -3814,6 +4212,7 @@ internal static partial class ShadowRagdollWorld
 			return;
 		}
 		detached.MotionDiagnosticLogged = true;
+		if (!RupturePlugin.Log.IsDebugEnabled) return;
 		Vector3 currentPosition = body.position;
 		float displacement = Vector3.Distance(detached.SpawnPosition, currentPosition);
 		float verticalDelta = currentPosition.y - detached.SpawnPosition.y;
@@ -3937,6 +4336,7 @@ internal static partial class ShadowRagdollWorld
 		rig.Dormant = true;
 		rig.SleepingSteps = 0;
 		RagdollCoordinator.SendPoseSnapshot(rig.Corpse, force: true);
+		if (!RupturePlugin.Log.IsDebugEnabled) return;
 		GetMaximumPoseChange(rig, out float displacement, out float rotation);
 		RupturePlugin.Log.LogInfo($"Shadow ragdoll dormant for {GetCorpseName(rig.NativeRagdoll)} after {Time.realtimeSinceStartup - rig.StartedAt:F2}s; " +
 			$"maxPoseChange={displacement:F3}m/{rotation:F1}deg; waiting for a native or moving-environment wake until the hard deadline.");
@@ -3965,8 +4365,16 @@ internal static partial class ShadowRagdollWorld
 		rig.SleepingSteps = 0;
 	}
 
-	private static bool TryWakeFromImpact(ShadowRig rig)
+	private static bool TryWakeFromImpact(ShadowRig rig) => BeginWakeFromImpact(rig, allowPending: false, out _);
+
+	/// <summary>
+	/// Wakes a rig for an impact. A settled rig needs its corridor captured first: with <paramref name="allowPending"/> the capture is
+	/// asked for without blocking, the rig stays parked and <paramref name="pending"/> is set until the capture lands or the bounded
+	/// wait makes the acquisition synchronous. Without it the corridor is acquired synchronously.
+	/// </summary>
+	private static bool BeginWakeFromImpact(ShadowRig rig, bool allowPending, out bool pending)
 	{
+		pending = false;
 		if (rig == null || rig.Corpse == null || rig.Root == null || IsHandoffHeld(rig.Corpse))
 		{
 			return false;
@@ -3987,11 +4395,17 @@ internal static partial class ShadowRagdollWorld
 
 		Vector3 center = CalculateCenter(rig);
 		Vector3 sweepEnd = CalculateEnvironmentSweepEnd(rig, center);
-		if (!(UsingExternalBackend && _externalRuntime.IsFullPrebake) &&
-			!TryAcquireEnvironment(rig, center, sweepEnd, out string failure, out _, out _))
+		if (!(UsingExternalBackend && _externalRuntime.IsFullPrebake) && !IsCorridorCaptured(rig, center))
 		{
-			RupturePlugin.Log.LogWarning($"Settled shadow ragdoll could not wake for {GetCorpseName(rig.NativeRagdoll)}: {failure}");
-			return false;
+			switch (AcquireRigEnvironment(rig, ref rig.CorpseWake, center, sweepEnd, allowPending, out string failure))
+			{
+			case EnvironmentAcquisition.Pending:
+				pending = true;
+				return false;
+			case EnvironmentAcquisition.Failed:
+				RupturePlugin.Log.LogWarning($"Settled shadow ragdoll could not wake for {GetCorpseName(rig.NativeRagdoll)}: {failure}");
+				return false;
+			}
 		}
 
 		rig.Root.SetActive(true);
@@ -4016,42 +4430,104 @@ internal static partial class ShadowRagdollWorld
 		rig.IgnoreNativeStopped = true;
 		rig.SleepingSteps = 0;
 		rig.StartedAt = Time.realtimeSinceStartup;
-		RupturePlugin.Log.LogInfo($"Settled shadow ragdoll reactivated for {GetCorpseName(rig.NativeRagdoll)}.");
+		if (RupturePlugin.Log.IsDebugEnabled)
+			RupturePlugin.Log.LogInfo($"Settled shadow ragdoll reactivated for {GetCorpseName(rig.NativeRagdoll)}.");
 		return true;
 	}
 
-	private static bool AreNativeCollidersTouching(ShadowRig leftRig, ShadowRig rightRig)
+	/// <summary>
+	/// Queues every settled rig whose native colliders touch <paramref name="rig"/>'s. The source bounds are read once for all candidates, a candidate far
+	/// from the source is rejected without reading any collider, and a nearby candidate reads each of its colliders once: a post-mortem shot on a corpse
+	/// that is already awake runs this for every settled rig in the raid, so the pairwise native-call cost of the former nested loops grew with the corpse count.
+	/// </summary>
+	private static void QueueTouchingSettledNeighbors(ShadowRig rig)
 	{
-		if (leftRig == null || rightRig == null)
+		bool hasCenter = TryGetNativeCenter(rig, out Vector3 center);
+		bool sourceCollected = false;
+		foreach (ShadowRig candidate in Rigs)
 		{
-			return false;
-		}
-		foreach (ShadowBody leftBody in leftRig.Bodies)
-		{
-			if (!leftBody.CountsForSleep)
+			if (candidate?.Settled != true || candidate.Corpse == null || IsHandoffHeld(candidate.Corpse) || ImpactWakeVisited.Contains(candidate))
 			{
 				continue;
 			}
-			foreach (Collider leftCollider in leftBody.NativeColliders)
+			if (hasCenter && TryGetNativeCenter(candidate, out Vector3 candidateCenter) &&
+				(candidateCenter - center).sqrMagnitude > NeighborWakeMaximumCenterDistance * NeighborWakeMaximumCenterDistance)
 			{
-				if (leftCollider == null || !leftCollider.enabled || !leftCollider.gameObject.activeInHierarchy)
+				continue;
+			}
+			if (!sourceCollected)
+			{
+				CollectNativeColliderBounds(rig, NeighborWakeSourceBounds);
+				sourceCollected = true;
+			}
+			if (!AreNativeCollidersTouching(NeighborWakeSourceBounds, candidate))
+			{
+				continue;
+			}
+			ImpactWakeVisited.Add(candidate);
+			ImpactWakeQueue.Add(candidate);
+		}
+	}
+
+	private static bool TryGetNativeCenter(ShadowRig rig, out Vector3 center)
+	{
+		Transform centerTransform = rig.CenterBody?.NativeTransform;
+		if (centerTransform == null)
+		{
+			center = default;
+			return false;
+		}
+		center = centerTransform.position;
+		return true;
+	}
+
+	/// <summary>Fills <paramref name="bounds"/> with the world bounds, grown by the wake contact margin, of every live collider of the rig's sleep-counting bodies.</summary>
+	private static void CollectNativeColliderBounds(ShadowRig rig, List<Bounds> bounds)
+	{
+		bounds.Clear();
+		foreach (ShadowBody body in rig.Bodies)
+		{
+			if (!body.CountsForSleep)
+			{
+				continue;
+			}
+			foreach (Collider collider in body.NativeColliders)
+			{
+				if (collider == null || !collider.enabled || !collider.gameObject.activeInHierarchy)
 				{
 					continue;
 				}
-				Bounds leftBounds = leftCollider.bounds;
-				leftBounds.Expand(0.1f);
-				foreach (ShadowBody rightBody in rightRig.Bodies)
+				Bounds colliderBounds = collider.bounds;
+				colliderBounds.Expand(0.1f);
+				bounds.Add(colliderBounds);
+			}
+		}
+	}
+
+	private static bool AreNativeCollidersTouching(List<Bounds> sourceBounds, ShadowRig candidate)
+	{
+		if (sourceBounds.Count == 0)
+		{
+			return false;
+		}
+		foreach (ShadowBody body in candidate.Bodies)
+		{
+			if (!body.CountsForSleep)
+			{
+				continue;
+			}
+			foreach (Collider collider in body.NativeColliders)
+			{
+				if (collider == null || !collider.enabled || !collider.gameObject.activeInHierarchy)
 				{
-					if (!rightBody.CountsForSleep)
+					continue;
+				}
+				Bounds candidateBounds = collider.bounds;
+				for (int index = 0; index < sourceBounds.Count; index++)
+				{
+					if (sourceBounds[index].Intersects(candidateBounds))
 					{
-						continue;
-					}
-					foreach (Collider rightCollider in rightBody.NativeColliders)
-					{
-						if (rightCollider != null && rightCollider.enabled && rightCollider.gameObject.activeInHierarchy && leftBounds.Intersects(rightCollider.bounds))
-						{
-							return true;
-						}
+						return true;
 					}
 				}
 			}
@@ -4085,6 +4561,7 @@ internal static partial class ShadowRagdollWorld
 		rig.Active = false;
 		rig.Dormant = false;
 		rig.Settled = true;
+		if (!RupturePlugin.Log.IsDebugEnabled) return;
 		GetMaximumPoseChange(rig, out float displacement, out float rotation);
 		RupturePlugin.Log.LogInfo($"Shadow ragdoll settled for {GetCorpseName(rig.NativeRagdoll)} after {Time.realtimeSinceStartup - rig.StartedAt:F2}s; " +
 			$"maxPoseChange={displacement:F3}m/{rotation:F1}deg; retained {rig.CoreBodies.Count} kinematic corpse bodies; independentWeaponAwake={rig.WeaponBody?.Proxy != null && !rig.WeaponBody.Proxy.isKinematic && !rig.WeaponSleeping}.");
@@ -4215,6 +4692,8 @@ internal static partial class ShadowRagdollWorld
 			}
 			RestoreDetachedEffectsToNative(rig);
 		}
+		// A weapon whose ignore pairs were deferred for external physics still hangs on its native hand joint; keep native parity.
+		CorpseWeaponCollisionFilter.ApplyDeferred(rig.NativeRagdoll);
 		DestroyRig(rig, restoreNative: false);
 		if (log)
 		{
@@ -4324,6 +4803,7 @@ internal static partial class ShadowRagdollWorld
 		}
 		if (rig != null && UsingExternalBackend && !_externalRuntime.IsFullPrebake && rig.ExternalGroup != 0)
 		{
+			CancelRigPrefetch(rig);
 			_externalRuntime.ReleaseEnvironment(rig.ExternalGroup);
 		}
 	}
@@ -4412,7 +4892,12 @@ internal static partial class ShadowRagdollWorld
 
 	private static Vector3 CalculateEnvironmentSweepEnd(ShadowRig rig, Vector3 center)
 	{
-		Vector3 velocity = CalculateCenterVelocity(rig);
+		return PredictEnvironmentSweepEnd(center, CalculateCenterVelocity(rig));
+	}
+
+	/// <summary>The end of the environment corridor for a body at <paramref name="center"/> moving at <paramref name="velocity"/>: half a second of motion plus gravity, clamped to the maximum sweep.</summary>
+	private static Vector3 PredictEnvironmentSweepEnd(Vector3 center, Vector3 velocity)
+	{
 		Vector3 displacement = velocity * EnvironmentPredictionSeconds +
 			Physics.gravity * (0.5f * EnvironmentPredictionSeconds * EnvironmentPredictionSeconds);
 		if (displacement.sqrMagnitude > MaximumEnvironmentSweepDistance * MaximumEnvironmentSweepDistance)

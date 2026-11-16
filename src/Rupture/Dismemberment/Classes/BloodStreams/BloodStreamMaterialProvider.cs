@@ -6,7 +6,7 @@ namespace Rupture.Dismemberment.Classes.BloodStreams;
 internal static class BloodStreamMaterialProvider
 {
 	private const string BundleName = "rupture-wound";
-	private const string ShaderName = "Rupture/PulsatingBloodStream";
+	internal const string ShaderName = "Rupture/PulsatingBloodStream";
 	private static Material _material;
 	private static Texture2D _fallbackAlbedo;
 	private static Texture2D _fallbackNormal;
@@ -17,6 +17,9 @@ internal static class BloodStreamMaterialProvider
 		if (_material != null) return _material;
 
 		if (WoundResources.IsLoading) return null;
+		// RaidWarmup resolves the EFT textures once per raid. Until it has settled, streams stay hidden
+		// instead of scanning; generated textures are used only after a settled miss.
+		if (!EftWoundTextures.BloodReady && !EftWoundTextures.LookupExhausted) return null;
 		Shader shader = WoundResources.GetShader(ShaderName);
 		if (shader == null)
 		{
@@ -29,16 +32,8 @@ internal static class BloodStreamMaterialProvider
 		}
 		if (shader == null) return null;
 
-		Texture2D bloodAlbedo = null;
-		Texture2D bloodNormal = null;
-		foreach (Texture2D texture in Resources.FindObjectsOfTypeAll<Texture2D>())
-		{
-			if (texture == null) continue;
-			if (bloodAlbedo == null && texture.name == "blood_splash_d") bloodAlbedo = texture;
-			else if (bloodNormal == null && texture.name == "blood_splash_n") bloodNormal = texture;
-			if (bloodAlbedo != null && bloodNormal != null) break;
-		}
-
+		Texture2D bloodAlbedo = EftWoundTextures.Blood;
+		Texture2D bloodNormal = EftWoundTextures.BloodNormal;
 		if (bloodAlbedo == null)
 		{
 			_fallbackAlbedo = MakeTexture("RPT Generated Blood Albedo", new Color32(70, 1, 2, 255));
@@ -73,6 +68,7 @@ internal static class BloodStreamMaterialProvider
 		_fallbackAlbedo = null;
 		_fallbackNormal = null;
 		_warnedShaderFallback = false;
+		RaidWarmup.InvalidateMaterials();
 	}
 
 	private static Texture2D MakeTexture(string name, Color32 color)

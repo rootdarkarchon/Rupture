@@ -25,7 +25,12 @@ internal static partial class BenchmarkRuptureHeadWound
         public double fallbackWorkerMs, craterWorkerMs;
         public int fallbackBuilds, craterBuilds;
         public StageTimingReport[] initialWoundStages;
+        // The second adopted wound sequence of the same run, after the first one paid any first-use JIT.
+        public StageTimingReport[] followingWoundStages;
         public double maximumStagedUpdateMs;
+        // Filled only when RUPTURE_FIXTURE_PREJIT=1 compiles the head-wound types before the first wound.
+        public int preJitMethods, preJitFailed;
+        public double preJitMs;
     }
     [Serializable] private sealed class StageTimingReport
     {
@@ -68,6 +73,7 @@ internal static partial class BenchmarkRuptureHeadWound
     private static IEnumerator RunWorkerChecks()
     {
         _workerReport = new WorkerReport();
+        if (Environment.GetEnvironmentVariable("RUPTURE_FIXTURE_PREJIT") == "1") PreJitHeadWounds();
         Mesh source = BuildEllipsoid(192, 96, HeadRadii);
         AddSkinningFixture(source);
         var snapshot = new ProceduralHeadWoundWorkspace();
@@ -322,13 +328,12 @@ internal static partial class BenchmarkRuptureHeadWound
                     var stageMax = (long[])Field(active, "StageMaxTicks");
                     Require(stageCalls.All(c => c > 0) && stageTicks.Select((t, i) => t >= stageMax[i] && stageMax[i] > 0).All(v => v),
                         "all production stages report CPU totals, atomic maxima and call counts");
-                    if (_workerReport.initialWoundStages == null)
-                    {
-                        var names = Enum.GetNames(typeof(HeadWoundSystem).GetNestedType("HeadStage", Hidden));
-                        _workerReport.initialWoundStages = stageCalls.Select((c, i) => new StageTimingReport { stage = names[i], calls = c,
-                            totalMainMs = stageTicks[i] * 1000d / Stopwatch.Frequency,
-                            maximumAtomicMainMs = stageMax[i] * 1000d / Stopwatch.Frequency }).ToArray();
-                    }
+                    var names = Enum.GetNames(typeof(HeadWoundSystem).GetNestedType("HeadStage", Hidden));
+                    var stageReport = stageCalls.Select((c, i) => new StageTimingReport { stage = names[i], calls = c,
+                        totalMainMs = stageTicks[i] * 1000d / Stopwatch.Frequency,
+                        maximumAtomicMainMs = stageMax[i] * 1000d / Stopwatch.Frequency }).ToArray();
+                    if (_workerReport.initialWoundStages == null) _workerReport.initialWoundStages = stageReport;
+                    else if (_workerReport.followingWoundStages == null) _workerReport.followingWoundStages = stageReport;
                     if (mode == "fallback") Require(pendingJob.UsedFallback &&
                         BloodStreams.PulsatingBloodStreamSystem.LastDirection == pendingJob.ResolvedDirection &&
                         BloodStreams.PulsatingBloodStreamSystem.LastTerminal == pendingJob.TerminalSurfaceResolved,
@@ -400,7 +405,7 @@ internal static partial class BenchmarkRuptureHeadWound
 
     private static void AdvanceHeadFrame()
     {
-        ProceduralCutFrameBudget.BeginFrame(2f);
+        FrameWorkBudget.BeginFrame(2f);
         var timer = Stopwatch.StartNew();
         HeadWoundSystem.Update(); timer.Stop();
         _workerReport.maximumStagedUpdateMs = Math.Max(_workerReport.maximumStagedUpdateMs, timer.Elapsed.TotalMilliseconds);
@@ -418,6 +423,54 @@ internal static partial class BenchmarkRuptureHeadWound
     }
 
     private static object Field(object target, string name) => target.GetType().GetField(name, Hidden).GetValue(target);
+
+    private static readonly string[] PreJitTypes =
+    {
+        "Rupture.Dismemberment.Classes.HeadWounds.HeadWoundSystem", "Rupture.Dismemberment.Classes.HeadWounds.HeadWoundBallistics",
+        "Rupture.Dismemberment.Classes.HeadWounds.HeadWoundPolicy", "Rupture.Dismemberment.Classes.HeadWounds.HeadWoundOrder",
+        "Rupture.Dismemberment.Classes.HeadWounds.HeadWoundShape", "Rupture.Dismemberment.Classes.HeadWounds.HeadWoundSkinning",
+        "Rupture.Dismemberment.Classes.HeadWounds.HeadWoundLifetime", "Rupture.Dismemberment.Classes.MeshFrameTransform"
+    };
+
+    /// <summary>
+    /// Compiles every method of the main-thread head-wound types up front, with the same RuntimeMethodHandle.GetFunctionPointer
+    /// mechanism and member filter as RaidWarmup.PreJit, so a run with RUPTURE_FIXTURE_PREJIT=1 shows the first wound without first-use JIT.
+    /// </summary>
+    private static void PreJitHeadWounds()
+    {
+        long started = Stopwatch.GetTimestamp();
+        var queue = new List<MethodBase>();
+        Assembly assembly = typeof(HeadWoundSystem).Assembly;
+        foreach (string name in PreJitTypes)
+        {
+            Type type = assembly.GetType(name, false);
+            if (type != null) CollectPreJitMethods(type, queue);
+        }
+        foreach (MethodBase method in queue)
+        {
+            try { method.MethodHandle.GetFunctionPointer(); _workerReport.preJitMethods++; }
+            catch (Exception) { _workerReport.preJitFailed++; }
+        }
+        _workerReport.preJitMs = (Stopwatch.GetTimestamp() - started) * 1000d / Stopwatch.Frequency;
+    }
+
+    private static void CollectPreJitMethods(Type type, List<MethodBase> queue)
+    {
+        if (type.ContainsGenericParameters) return;
+        foreach (ConstructorInfo constructor in type.GetConstructors(Hidden | BindingFlags.DeclaredOnly))
+            if (IsPreJitCompilable(constructor)) queue.Add(constructor);
+        foreach (MethodInfo method in type.GetMethods(Hidden | BindingFlags.DeclaredOnly))
+            if (IsPreJitCompilable(method)) queue.Add(method);
+        foreach (Type nested in type.GetNestedTypes(Hidden | BindingFlags.DeclaredOnly)) CollectPreJitMethods(nested, queue);
+    }
+
+    private static bool IsPreJitCompilable(MethodBase method)
+    {
+        if (method.IsAbstract || method.ContainsGenericParameters || (method.Attributes & MethodAttributes.PinvokeImpl) != 0) return false;
+        MethodImplAttributes flags = method.GetMethodImplementationFlags();
+        return (flags & MethodImplAttributes.InternalCall) == 0 && (flags & MethodImplAttributes.CodeTypeMask) == MethodImplAttributes.IL;
+    }
+
     private static HeadWoundData Packet(CorpseInteractionTarget target, ProceduralWoundDescriptor descriptor, int ordinal) =>
         new HeadWoundData { ProfileId = target.ProfileId, PlayerId = target.PlayerId, DeathSequence = target.DeathSequence,
             WoundOrdinal = (byte)ordinal, EntryLocal = descriptor.Entry, DirectionLocal = (descriptor.Exit - descriptor.Entry).normalized,

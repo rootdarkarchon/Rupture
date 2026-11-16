@@ -1,10 +1,13 @@
 [CmdletBinding()]
 param([string]$UnityEditorPath = 'C:\Program Files\Unity 2022.3.43f1\Editor\Unity.exe',
-    [Parameter(Mandatory=$true)][string]$SptInstallPath, [string]$FixtureDirectory)
+    [Parameter(Mandatory=$true)][string]$SptInstallPath, [string]$FixtureDirectory,
+    # What runs before the first measured fracture: cold, prejit-old (the pre-warmup pre-JIT list), prejit, or warm (production).
+    [ValidateSet('cold','prejit-old','prejit','warm')][string]$FirstUseMode = 'warm')
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $project = Join-Path $repo 'artifacts/FractureRuntimeUnity'
 $env:RPT_FRACTURE_GAME_ROOT = $SptInstallPath
+$env:RPT_FRACTURE_FIRST_USE = $FirstUseMode
 if (!$FixtureDirectory) { $FixtureDirectory = Join-Path $repo 'artifacts/ClothAllLodFixtures' }
 $env:RPT_FRACTURE_FIXTURES = $FixtureDirectory
 foreach ($directory in @('Assets/Fractures','ProjectSettings','Packages')) {
@@ -17,6 +20,7 @@ $sources = @('src/Rupture/Health/NativeHealthEffects.cs',
     'src/Rupture/Dismemberment/Classes/Fractures/FractureSurface.cs',
     'src/Rupture/Dismemberment/Classes/Fractures/FractureVisual.cs',
     'src/Rupture/Dismemberment/Classes/Fractures/FractureSystem.cs',
+    'src/Rupture/Dismemberment/Classes/Fractures/FractureWarmup.cs',
     'tests/Unity/FractureRuntimeFixture.cs','tests/Unity/FractureRuntimeTests.cs','tests/Unity/FractureNativeFixtureTests.cs',
     'unity/RuptureWound/Assets/Editor/ClothingHarness/ClothingFixtures.cs')
 foreach ($source in $sources) {

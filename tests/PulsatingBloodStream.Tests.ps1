@@ -152,7 +152,11 @@ if (Test-Path -LiteralPath (Join-Path $repoRoot 'src\Rupture\Dismemberment\Class
 foreach ($needle in @('Shader "Rupture/PulsatingBloodStream"', 'uv_MainTex', 'RenderType"="Opaque"')) {
     Need $shader $needle "Object-UV opaque stream shader missing: $needle"
 }
-foreach ($needle in @('blood_splash_d', 'blood_splash_n', 'RPT Generated Blood Albedo', 'Shader.Find("Standard")')) {
+$eftTextures = Read-Repo "src\Rupture\EftWoundTextures.cs"
+foreach ($needle in @('blood_splash_d', 'blood_splash_n')) {
+    Need $eftTextures $needle "Shared EFT blood texture source missing: $needle"
+}
+foreach ($needle in @('EftWoundTextures.Blood', 'RPT Generated Blood Albedo', 'Shader.Find("Standard")')) {
     Need $material $needle "EFT texture or dark-red material fallback missing: $needle"
 }
 foreach ($needle in @('new Color(0.82f, 0.18f, 0.16f', 'SetFloat("_Smoothness", 0.94f)',

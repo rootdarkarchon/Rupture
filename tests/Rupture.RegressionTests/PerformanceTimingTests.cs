@@ -85,7 +85,7 @@ internal static class PerformanceTimingTests
             for (int i = 0; i < 30; i++) queue();
             metricType.GetMethod("Record", Instance).Invoke(live, new object[] { 999d });
             release.Set(); wait();
-            Check(writerThread != mainThread && lines.Count == 13, "slow sink writes one bounded report on a worker");
+            Check(writerThread != mainThread && lines.Count == 14, "slow sink writes one bounded report on a worker");
             Check(lines[0].Contains("update:5.000/4.000/5.000/5.000ms/2") && lines[1].Contains("updateFrames=2;"), "callback and stage report share the frozen frame boundary");
             lines.Clear(); entered.Reset(); release.Reset();
             queue(); Check(entered.Wait(5000), "next report starts after the previous worker retires");

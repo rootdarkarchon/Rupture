@@ -13,6 +13,8 @@ internal struct EnvironmentPollCadence
         _next = now + 0.25f;
         return true;
     }
+    // A poll that deferred work asks for the next frame instead of waiting a quarter second.
+    internal void Expedite() => _next = 0f;
 }
 
 // Do not consume Transform.hasChanged: EFT and other mods also own that flag.

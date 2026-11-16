@@ -1024,13 +1024,20 @@ internal static partial class RagdollCoordinator
 			return false;
 		}
 
+		// Debug-gated child stages of ShotPrepare; explosions reach this method from outside the shot processor and stay untraced.
+		bool traceShot = !explosion;
+
 		// A retained shadow rig can outlive its heavyweight coordinator state. When
 		// impact reactivation is enabled, restore that state from its tombstone so
 		// old corpses remain just as wakeable as newly settled ones.
-		RagdollState directState = GetStateForCorpse(corpse, allowRetired: ImpactReactivationEnabled);
-		if (directState != null)
+		RagdollState directState;
+		using (ShadowRagdollWorld.TraceMainThread(ShadowRagdollWorld.MainThreadStage.ShotPrepareState, traceShot))
 		{
-			target = CreateInteractionTarget(directState);
+			directState = GetStateForCorpse(corpse, allowRetired: ImpactReactivationEnabled);
+			if (directState != null)
+			{
+				target = CreateInteractionTarget(directState);
+			}
 		}
 		bool initialImpact = directState != null && (explosion
 			? ConsumeInitialExplosionImpact(directState)
@@ -1045,28 +1052,39 @@ internal static partial class RagdollCoordinator
 		}
 
 		postMortemImpact = true;
-		if (!ShadowRagdollWorld.WakeFromImpact(corpse, ImpactWakeCorpses))
+		bool woke;
+		using (ShadowRagdollWorld.TraceMainThread(ShadowRagdollWorld.MainThreadStage.ShotPrepareWake, traceShot))
+		{
+			woke = ShadowRagdollWorld.WakeFromImpact(corpse, ImpactWakeCorpses, traceShot);
+		}
+		if (!woke)
 		{
 			return false;
 		}
 
 		int duration = GetConfiguredDuration();
 		bool directPrepared = false;
-		foreach (Corpse awakenedCorpse in ImpactWakeCorpses)
+		using (ShadowRagdollWorld.TraceMainThread(ShadowRagdollWorld.MainThreadStage.ShotPrepareReactivate, traceShot))
 		{
-			RagdollState state = GetStateForCorpse(awakenedCorpse, allowRetired: true);
-			if (state == null)
+			foreach (Corpse awakenedCorpse in ImpactWakeCorpses)
 			{
-				ShadowRagdollWorld.ForceSettle(awakenedCorpse);
-				continue;
-			}
-			ReactivateState(state, duration);
-			awakenedStates?.Add(state);
-			SendReactivationWake(state);
-			if (ReferenceEquals(awakenedCorpse, corpse))
-			{
-				directPrepared = true;
-				target = CreateInteractionTarget(state);
+				RagdollState state = GetStateForCorpse(awakenedCorpse, allowRetired: true);
+				if (state == null)
+				{
+					ShadowRagdollWorld.ForceSettle(awakenedCorpse);
+					continue;
+				}
+				ReactivateState(state, duration);
+				awakenedStates?.Add(state);
+				using (ShadowRagdollWorld.TraceMainThread(ShadowRagdollWorld.MainThreadStage.ShotPrepareNetwork, traceShot))
+				{
+					SendReactivationWake(state);
+				}
+				if (ReferenceEquals(awakenedCorpse, corpse))
+				{
+					directPrepared = true;
+					target = CreateInteractionTarget(state);
+				}
 			}
 		}
 		ImpactWakeCorpses.Clear();
@@ -1080,7 +1098,7 @@ internal static partial class RagdollCoordinator
 			return false;
 		}
 		ImpactWakeCorpses.Clear();
-		if (!ShadowRagdollWorld.WakeFromImpact(corpse, ImpactWakeCorpses))
+		if (!ShadowRagdollWorld.WakeFromImpact(corpse, ImpactWakeCorpses, deferPrimary: true))
 		{
 			return false;
 		}

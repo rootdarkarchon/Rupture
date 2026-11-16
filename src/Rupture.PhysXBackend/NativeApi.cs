@@ -17,6 +17,27 @@ internal sealed class NativeApi : IDisposable
 	private const uint LoadLibrarySearchSystem32 = 0x00000800;
 
 	private IntPtr _module;
+	/// <summary>
+	/// UnityEngine.Vector3 is three sequential floats, the same 12-byte layout as RptPxVec3. Verified once so
+	/// mesh vertices can be written straight into Vector3[]; a mismatch keeps the two-step Vec3 copy.
+	/// </summary>
+	internal static readonly bool Vector3MatchesNativeLayout = ProbeVector3Layout();
+
+	private static bool ProbeVector3Layout()
+	{
+		try
+		{
+			return Marshal.SizeOf(typeof(Vector3)) == 12 && Marshal.SizeOf(typeof(Vec3)) == 12 &&
+				(int)Marshal.OffsetOf(typeof(Vector3), nameof(Vector3.x)) == 0 &&
+				(int)Marshal.OffsetOf(typeof(Vector3), nameof(Vector3.y)) == 4 &&
+				(int)Marshal.OffsetOf(typeof(Vector3), nameof(Vector3.z)) == 8;
+		}
+		catch (ArgumentException)
+		{
+			return false;
+		}
+	}
+
 	internal readonly GetAbiDelegate GetAbi;
 	internal readonly GetLastErrorDelegate GetLastError;
 	internal readonly GetUnitySceneFromActorDelegate GetUnitySceneFromActor;
@@ -24,6 +45,8 @@ internal sealed class NativeApi : IDisposable
 	internal readonly EnumerateUnityShapesDelegate EnumerateUnityShapes;
 	internal readonly OverlapUnityShapesDelegate OverlapUnityShapes;
 	internal readonly ExtractUnityMeshDelegate ExtractUnityMesh;
+	/// <summary>Same native export as <see cref="ExtractUnityMesh"/>, bound to Vector3[] so extraction needs no second vertex copy; null when the layout probe fails.</summary>
+	internal readonly ExtractUnityMeshVectorsDelegate ExtractUnityMeshVectors;
 	internal readonly ExtractUnityHeightFieldDelegate ExtractUnityHeightField;
 	internal readonly CreateSceneDelegate CreateScene;
 	internal readonly DestroySceneDelegate DestroyScene;
@@ -77,6 +100,7 @@ internal sealed class NativeApi : IDisposable
 		EnumerateUnityShapes = Load<EnumerateUnityShapesDelegate>("rptpx_unity_enumerate_shapes");
 		OverlapUnityShapes = Load<OverlapUnityShapesDelegate>("rptpx_unity_overlap_shapes");
 		ExtractUnityMesh = Load<ExtractUnityMeshDelegate>("rptpx_unity_extract_mesh");
+		ExtractUnityMeshVectors = Vector3MatchesNativeLayout ? Load<ExtractUnityMeshVectorsDelegate>("rptpx_unity_extract_mesh") : null;
 		ExtractUnityHeightField = Load<ExtractUnityHeightFieldDelegate>("rptpx_unity_extract_heightfield");
 		CreateScene = Load<CreateSceneDelegate>("rptpx_create_scene");
 		DestroyScene = Load<DestroySceneDelegate>("rptpx_destroy_scene");
@@ -177,6 +201,7 @@ internal sealed class NativeApi : IDisposable
 	[UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate int EnumerateUnityShapesDelegate(IntPtr unityScene, [Out] IntPtr[] shapes, uint capacity, out uint writtenOrRequired);
 	[UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate int OverlapUnityShapesDelegate(IntPtr unityScene, ref Vec3 point0, ref Vec3 point1, float radius, [Out] IntPtr[] shapes, uint capacity, out uint writtenOrRequired);
 	[UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate int ExtractUnityMeshDelegate(IntPtr shape, ref UnityMeshInfo info, [Out] Vec3[] vertices, uint vertexCapacity, [Out] uint[] indices, uint indexCapacity);
+	[UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate int ExtractUnityMeshVectorsDelegate(IntPtr shape, ref UnityMeshInfo info, [Out] Vector3[] vertices, uint vertexCapacity, [Out] uint[] indices, uint indexCapacity);
 	[UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate int ExtractUnityHeightFieldDelegate(IntPtr shape, ref UnityHeightFieldInfo info, [Out] byte[] samples, uint sampleCapacity, [Out] MaterialDesc[] materials, uint materialCapacity);
 	[UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate int CreateSceneDelegate(ref SceneDesc desc, out IntPtr scene);
 	[UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate void DestroySceneDelegate(IntPtr scene);

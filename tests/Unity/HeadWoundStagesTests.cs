@@ -35,8 +35,8 @@ internal static partial class BenchmarkRuptureHeadWound
         try
         {
             HeadWoundSystem.PrepareResources();
-            ProceduralCutFrameBudget.BeginFrame(2f);
-            ProceduralCutFrameBudget.RecordStage(long.MaxValue / 2);
+            FrameWorkBudget.BeginFrame(2f);
+            FrameWorkBudget.RecordStage(long.MaxValue / 2);
             HeadWoundSystem.Update();
             Require(HeadWoundMaterialProvider.Calls == 0, "resource preparation obeys an exhausted shared allowance");
             AdvanceHeadFrame();
@@ -78,8 +78,8 @@ internal static partial class BenchmarkRuptureHeadWound
         try
         {
             HeadWoundSystem.Enqueue(target, Packet(target, MultipleDescriptors("intersecting")[0], 1));
-            ProceduralCutFrameBudget.BeginFrame(0.5f);
-            ProceduralCutFrameBudget.RecordStage(long.MaxValue / 2);
+            FrameWorkBudget.BeginFrame(0.5f);
+            FrameWorkBudget.RecordStage(long.MaxValue / 2);
             HeadWoundSystem.Update();
             Require(typeof(HeadWoundSystem).GetField("_activeWork", Hidden).GetValue(null) == null && skin.enabled,
                 "limb-exhausted shared allowance defers head capture");
@@ -107,8 +107,8 @@ internal static partial class BenchmarkRuptureHeadWound
             }
             Require(Field(build, "Stage").ToString() == stopStage, "reached stage " + stopStage);
             int[] beforeCalls = (int[])((int[])Field(work, "StageCalls")).Clone();
-            ProceduralCutFrameBudget.BeginFrame(0.5f);
-            ProceduralCutFrameBudget.RecordStage(long.MaxValue / 2);
+            FrameWorkBudget.BeginFrame(0.5f);
+            FrameWorkBudget.RecordStage(long.MaxValue / 2);
             HeadWoundSystem.Update();
             Require(Field(build, "Stage").ToString() == stopStage && ((int[])Field(work, "StageCalls")).SequenceEqual(beforeCalls),
                 "exhausted shared allowance starts no head step at " + stopStage);

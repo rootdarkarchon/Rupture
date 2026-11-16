@@ -50,7 +50,8 @@ internal static class Program
         DownedDeathTests.Run(assembly, Bridge);
         ImpactReconciliationTests.Run(assembly, Bridge);
         HeadWoundPolicyTests.Run(assembly);
-        ProceduralCutBudgetTests.Run(assembly);
+        HeadgearThrowSequenceTests.Run();
+        FrameWorkBudgetTests.Run(assembly);
         HeadgearDiagnosticsTests.Run(assembly, Bridge);
         ImpactWireTests.Run(Bridge);
         ImpactAbiTests.Run(assembly);

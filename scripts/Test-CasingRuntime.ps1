@@ -9,7 +9,7 @@ foreach ($directory in @('Assets/Casings','ProjectSettings','Packages')) {
 Set-Content -LiteralPath (Join-Path $project 'ProjectSettings/ProjectVersion.txt') 'm_EditorVersion: 2022.3.43f1'
 Set-Content -LiteralPath (Join-Path $project 'Packages/manifest.json') '{"dependencies":{"com.unity.modules.physics":"1.0.0"}}'
 foreach ($source in @('src/Rupture/Casings/CasingWorld.cs','src/Rupture/Casings/CasingGeometry.cs','src/Rupture/Casings/CasingImpactQuery.cs',
-    'src/Rupture/Ragdolls/External/ExternalCasingContracts.cs','src/Rupture/ObjectLifetime.cs','tests/Unity/MainThreadTracingFixture.cs','tests/Unity/CasingRuntimeTests.cs')) {
+    'src/Rupture/Ragdolls/External/ExternalCasingContracts.cs','src/Rupture/Ragdolls/External/ExternalEnvironmentPrefetchContracts.cs','src/Rupture/ObjectLifetime.cs','tests/Unity/MainThreadTracingFixture.cs','tests/Unity/CasingRuntimeTests.cs')) {
     $content = Get-Content -LiteralPath (Join-Path $repo $source) -Raw
     if ($content -match '(?m)^namespace [\w.]+;\r?$') { $content = [regex]::Replace($content, '(?m)^namespace ([\w.]+);\r?$', 'namespace $1 {') + "`n}`n" }
     [IO.File]::WriteAllText((Join-Path $project ('Assets/Casings/' + [IO.Path]::GetFileName($source))), $content)

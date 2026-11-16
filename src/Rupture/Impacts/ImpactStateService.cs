@@ -64,7 +64,12 @@ internal static class ImpactStateService
     internal static void RecordDamage(Player player, EFT.Ballistics.DamageInfo damage, EBodyPart part, float appliedDamage, float healthBeforeHit)
     {
         if (player?.HealthController == null || !LimbImpactPolicy.Positive(appliedDamage) ||
-            (RagdollCoordinator.IsRemoteClient && !player.IsYourPlayer) || !Eligible(damage)) return;
+            (RagdollCoordinator.IsRemoteClient && !player.IsYourPlayer)) return;
+        // A bot hit by something that can kill it with a ragdoll impulse (a bullet, or an explosion or grenade fragment) may die
+        // next: warm its environment so the corpse build finds it captured. Bleeding, falls and other damage never do.
+        if (damage.DamageType == EDamageType.Bullet || DeathImpactPolicy.IsExplosion(damage.DamageType))
+            ShadowRagdollWorld.PrefetchForDamagedBot(player);
+        if (!Eligible(damage)) return;
         VictimState state = Get(player);
         int index = Index(part);
         if (!Current.Valid)

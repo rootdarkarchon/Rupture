@@ -92,6 +92,15 @@ namespace Rupture.Ragdolls.Classes
         private static readonly Dictionary<string, PendingColliderDisable> PendingColliderDisables = new Dictionary<string, PendingColliderDisable>();
         private static readonly HashSet<string> FailedColliderDisableProfiles = new HashSet<string>();
         private sealed class DetachedEffect { }
+        // The fixture runtime has no prefetch extension: the production non-blocking route is unavailable, so every acquisition is synchronous.
+        private enum EnvironmentWait { Ready, Pending, Synchronous }
+        private enum EnvironmentAcquisition { Acquired, Pending, Failed }
+        private struct EnvironmentWaitState { internal float StartedAt; internal Vector3 Center, SweepEnd; }
+        private static long _environmentSyncFallbacks;
+        private static EnvironmentWait PollEnvironment(uint consumerId, ref EnvironmentWaitState wait, Vector3 center, Vector3 sweepEnd,
+            float now, out Vector3 boundCenter, out Vector3 boundSweepEnd)
+        { boundCenter = center; boundSweepEnd = sweepEnd; return EnvironmentWait.Synchronous; }
+        private static bool CorridorCovers(Vector3 center, Vector3 start, Vector3 end) => false;
         private static string GetCorpseName(CorpseRagdoll ragdoll) => "fixture corpse";
         private static bool TryBuildWeaponBox(Rigidbody body, IReadOnlyList<Collider> colliders, string profile, out ExternalBoxShape box, out string failure)
             => throw new NotSupportedException("weapon fitting is outside the living/corpse handoff fixture");
@@ -389,6 +398,24 @@ namespace Rupture.Ragdolls.Classes
             LiveSeverRuntimeTests.Check(!TryCreateBody(intactRig, missing.Rigidbody, "intact foot", true, out _),
                 "an unknown intact body without colliders still fails admission");
             missing.gameObject.AddComponent<BoxCollider>().size = Vector3.one * .2f; missing.Remove();
+            var filterHost = new GameObject("simulated collider filter"); var filterBody = filterHost.AddComponent<Rigidbody>();
+            var simulatedBox = filterHost.AddComponent<BoxCollider>();
+            filterHost.AddComponent<BoxCollider>().isTrigger = true;
+            var dormantChild = new GameObject("dormant"); dormantChild.transform.SetParent(filterHost.transform, false);
+            dormantChild.AddComponent<BoxCollider>().enabled = false;
+            var handsWeapon = new GameObject("hands weapon"); handsWeapon.transform.SetParent(filterHost.transform, false);
+            handsWeapon.AddComponent<BoxCollider>();
+            var foreignRoot = new GameObject("foreign body"); foreignRoot.transform.SetParent(filterHost.transform, false);
+            foreignRoot.AddComponent<Rigidbody>(); var foreignBox = foreignRoot.AddComponent<BoxCollider>();
+            var structuralColliders = GetAttachedBodyColliders(filterBody); structuralColliders.Add(foreignBox);
+            var filterRig = new ShadowRig { HandsWeaponRoot = handsWeapon.transform };
+            var simulatedColliders = new List<Collider>();
+            GetSimulatedBodyColliders(filterRig, filterBody, structuralColliders, simulatedColliders);
+            LiveSeverRuntimeTests.Check(simulatedColliders.Count == 1 && simulatedColliders[0] == simulatedBox &&
+                filterRig.SkippedTriggerColliders == 1 && filterRig.SkippedInactiveColliders == 1 &&
+                filterRig.SkippedForeignBodyColliders == 1 && filterRig.SkippedWeaponColliders == 1,
+                "bone bodies simulate only enabled non-trigger colliders they own outside the hands weapon, counted by reason");
+            UnityEngine.Object.DestroyImmediate(filterHost);
         }
     }
 }

@@ -61,6 +61,14 @@ internal static partial class ShadowRagdollWorld
         internal float ExpiresAt;
         internal Vector3 Velocity;
         internal Action<bool, string> Completion;
+        /// <summary>Registration inputs kept while the cut waits, parked, for the capture of the corridor it lands in.</summary>
+        internal bool AwaitingEnvironment;
+        internal Vector3 Point, Direction, Position, NativeVelocity;
+        internal Quaternion Rotation;
+        internal ExternalTransientConvexShape[] Shapes;
+        /// <summary>The corridor captured for this gib and the bounded wait for the next one; an impact on a gib that is still inside the captured corridor does not stop for a capture.</summary>
+        internal Vector3 EnvironmentCenter, EnvironmentSweepEnd;
+        internal EnvironmentWaitState CorridorWait;
     }
     private static readonly Dictionary<Player, LivingRig> LivingRigs = new Dictionary<Player, LivingRig>();
     private static readonly List<Player> LivingRemoved = new List<Player>();
@@ -140,6 +148,7 @@ internal static partial class ShadowRagdollWorld
                     rig.Joints.Add(new LivingJoint { Body = body, Connected = connected, External = external });
                 }
             }
+            _environmentSyncFallbacks++;
             if (rig.Bodies.Count == 0 || !_externalRuntime.EnsureEnvironment(rig.Group, player.Transform.Original.position,
                 player.Transform.Original.position + player.Velocity, out _, out failure)) throw new InvalidOperationException(failure ?? "empty living rig");
             foreach (RigidbodySpawner spawner in rig.Pool.RigidbodySpawners)
@@ -289,6 +298,21 @@ internal static partial class ShadowRagdollWorld
             LivingGib gib = LivingGibs[i];
             if (gib.Root == null || Time.realtimeSinceStartup > gib.ExpiresAt)
             { DestroyLivingGib(gib); LivingGibs.RemoveAt(i); continue; }
+            if (gib.AwaitingEnvironment)
+            {
+                // The cut stays parked until the corridor it lands in is captured; a failure retires it like a failed creation.
+                string waitFailure;
+                EnvironmentAcquisition acquisition = AcquireLivingGibEnvironment(gib, gib.Point, gib.Point + gib.Direction, out waitFailure);
+                if (acquisition == EnvironmentAcquisition.Pending) continue;
+                if (acquisition == EnvironmentAcquisition.Acquired)
+                {
+                    gib.AwaitingEnvironment = false;
+                    try { acquisition = StartLivingGibBody(gib, out waitFailure) ? EnvironmentAcquisition.Acquired : EnvironmentAcquisition.Failed; }
+                    catch (Exception exception) { waitFailure = exception.Message; acquisition = EnvironmentAcquisition.Failed; }
+                }
+                if (acquisition == EnvironmentAcquisition.Failed)
+                { gib.Completion?.Invoke(false, waitFailure); gib.Completion = null; DestroyLivingGib(gib); LivingGibs.RemoveAt(i); continue; }
+            }
             if (gib.Creation != null)
             {
                 var status = gib.Creation.Poll(out var body, out string failure);
@@ -400,12 +424,35 @@ internal static partial class ShadowRagdollWorld
         if (LivingGibs.Count >= 128)
         { completion?.Invoke(false, "living detached-limb capacity reached"); return false; }
         Rigidbody native = root.GetComponent<Rigidbody>();
+        if (native == null) { completion?.Invoke(false, "living gib rigidbody missing"); return false; }
         uint group = ++_externalGroupSequence;
-        if (native == null || !_externalRuntime.EnsureEnvironment(group, point, point + direction, out _, out failure))
-        { _externalRuntime.ReleaseEnvironment(group); completion?.Invoke(false, failure ?? "living gib rigidbody missing"); return false; }
-        Vector3 velocity = native.velocity;
-        Vector3 position = native.transform.position;
-        Quaternion rotation = native.transform.rotation;
+        var gib = new LivingGib { Root = root, Native = native, Group = group, Point = point, Direction = direction, Shapes = shapes,
+            Position = native.transform.position, Rotation = native.transform.rotation, NativeVelocity = native.velocity,
+            Completion = completion, ExpiresAt = Time.realtimeSinceStartup + 120f };
+        switch (AcquireLivingGibEnvironment(gib, point, point + direction, out failure))
+        {
+            case EnvironmentAcquisition.Failed:
+                _externalRuntime.ReleaseEnvironment(group); completion?.Invoke(false, failure ?? "living gib environment unavailable"); return false;
+            case EnvironmentAcquisition.Pending:
+                // Parked like a created gib shell until its corridor is captured; UpdateLivingFalls starts the body then.
+                gib.AwaitingEnvironment = true;
+                ParkLocalDetachedEffectShell(root);
+                LivingGibs.Add(gib);
+                return true;
+        }
+        try
+        {
+            if (!StartLivingGibBody(gib, out failure)) { _externalRuntime.ReleaseEnvironment(group); completion?.Invoke(false, failure); return false; }
+        }
+        catch { _externalRuntime.ReleaseEnvironment(group); throw; }
+        LivingGibs.Add(gib);
+        return true;
+    }
+    /// <summary>Starts the external body of a registered living gib once its environment exists; false when the backend refused to begin it.</summary>
+    private static bool StartLivingGibBody(LivingGib gib, out string failure)
+    {
+        GameObject root = gib.Root;
+        Rigidbody native = gib.Native;
         // The gib is one body; disabled shapes report no attachedRigidbody.
         var colliders = new List<Collider>();
         foreach (Collider collider in root.GetComponentsInChildren<Collider>(true))
@@ -416,19 +463,18 @@ internal static partial class ShadowRagdollWorld
             // Capture dynamic gravity/CCD state and the intended transform before
             // parking the Unity presentation shell. The backend snapshots these now.
             native.isKinematic = false;
-            native.position = position; native.rotation = rotation; native.useGravity = true;
+            native.position = gib.Position; native.rotation = gib.Rotation; native.useGravity = true;
             native.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
             native.maxDepenetrationVelocity = LocalGibMaximumDepenetrationSpeed;
             native.maxAngularVelocity = LocalGibMaximumAngularSpeed;
-            creation = _externalRuntime.BeginCreateTransientConvexBody(native, shapes, group, false,
+            creation = _externalRuntime.BeginCreateTransientConvexBody(native, gib.Shapes, gib.Group, false,
                 ExternalCollisionProfile.EnvironmentOnly, out failure);
         }
-        catch { _externalRuntime.ReleaseEnvironment(group); throw; }
         finally { ParkLocalDetachedEffectShell(root); }
-        if (creation == null) { _externalRuntime.ReleaseEnvironment(group); completion?.Invoke(false, failure); return false; }
-        LivingGibs.Add(new LivingGib { Root = root, Native = native, Colliders = colliders.ToArray(), Creation = creation, Group = group,
-            Velocity = Vector3.ClampMagnitude(velocity + Vector3.ClampMagnitude(direction, 1f) * 2f, LocalGibMaximumInitialLaunchSpeed),
-            Completion = completion, ExpiresAt = Time.realtimeSinceStartup + 120f });
+        if (creation == null) return false;
+        gib.Colliders = colliders.ToArray();
+        gib.Creation = creation;
+        gib.Velocity = Vector3.ClampMagnitude(gib.NativeVelocity + Vector3.ClampMagnitude(gib.Direction, 1f) * 2f, LocalGibMaximumInitialLaunchSpeed);
         return true;
     }
     internal static void CancelLivingGib(GameObject root)
@@ -475,10 +521,44 @@ internal static partial class ShadowRagdollWorld
     }
     private static bool EnsureLivingGibEnvironment(LivingGib gib, Vector3 center, Vector3 sweepEnd)
     {
-        // Spawn coverage only surrounds the cut point; an impact can move the
-        // limb elsewhere, so refresh this gib's proximity consumer first.
-        return _externalRuntime != null && (_externalRuntime.IsFullPrebake ||
-            _externalRuntime.EnsureEnvironment(gib.Group, center, sweepEnd, out _, out _));
+        if (_externalRuntime == null) return false;
+        if (_externalRuntime.IsFullPrebake) return true;
+        // Spawn coverage only surrounds the cut point; an impact can move the limb elsewhere. The gib keeps simulating inside the
+        // corridor already captured for it while the capture of the corridor the impact points at runs in the background, and
+        // only waits on a synchronous capture once it has left what was captured.
+        switch (PollEnvironment(gib.Group, ref gib.CorridorWait, center, sweepEnd, Time.realtimeSinceStartup, out Vector3 boundCenter, out Vector3 boundSweepEnd))
+        {
+            case EnvironmentWait.Ready:
+                gib.EnvironmentCenter = boundCenter; gib.EnvironmentSweepEnd = boundSweepEnd;
+                return true;
+            case EnvironmentWait.Pending:
+                if (CorridorCovers(center, gib.EnvironmentCenter, gib.EnvironmentSweepEnd)) return true;
+                break;
+        }
+        return AcquireLivingGibSynchronously(gib, center, sweepEnd, out _) == EnvironmentAcquisition.Acquired;
+    }
+    /// <summary>Environment for a registering gib: the non-blocking route first (Pending while the capture runs), the synchronous one when it is unavailable or its wait ran out.</summary>
+    private static EnvironmentAcquisition AcquireLivingGibEnvironment(LivingGib gib, Vector3 center, Vector3 sweepEnd, out string failure)
+    {
+        failure = null;
+        if (_externalRuntime.IsFullPrebake) return EnvironmentAcquisition.Acquired;
+        switch (PollEnvironment(gib.Group, ref gib.CorridorWait, center, sweepEnd, Time.realtimeSinceStartup, out Vector3 boundCenter, out Vector3 boundSweepEnd))
+        {
+            case EnvironmentWait.Ready:
+                gib.EnvironmentCenter = boundCenter; gib.EnvironmentSweepEnd = boundSweepEnd;
+                return EnvironmentAcquisition.Acquired;
+            case EnvironmentWait.Pending:
+                return EnvironmentAcquisition.Pending;
+        }
+        return AcquireLivingGibSynchronously(gib, center, sweepEnd, out failure);
+    }
+    private static EnvironmentAcquisition AcquireLivingGibSynchronously(LivingGib gib, Vector3 center, Vector3 sweepEnd, out string failure)
+    {
+        _environmentSyncFallbacks++;
+        gib.CorridorWait.StartedAt = 0f;
+        if (!_externalRuntime.EnsureEnvironment(gib.Group, center, sweepEnd, out _, out failure)) return EnvironmentAcquisition.Failed;
+        gib.EnvironmentCenter = center; gib.EnvironmentSweepEnd = sweepEnd;
+        return EnvironmentAcquisition.Acquired;
     }
     private static void DestroyLivingGib(LivingGib gib)
     {

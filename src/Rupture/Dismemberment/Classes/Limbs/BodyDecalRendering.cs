@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -8,6 +9,7 @@ internal static class BodyDecalRendering
 {
     private static Mesh _scratch;
     private static int _failures;
+    private static readonly Dictionary<int, bool> DecalShaders = new Dictionary<int, bool>();
     internal static Action<string> ReportFailure;
 
     internal static bool IsAlive(Renderer renderer) => renderer != null;
@@ -21,7 +23,7 @@ internal static class BodyDecalRendering
         }
         else if (!renderer.isVisible) return false;
         Material material = renderer.sharedMaterial;
-        return material?.shader != null && material.shader.name.IndexOf("_Decal", StringComparison.Ordinal) >= 0;
+        return material?.shader != null && IsDecalShader(material.shader);
     }
 
     // Invoked only from EFT's character texture painter. A culled skin may not
@@ -57,6 +59,19 @@ internal static class BodyDecalRendering
     {
         if (_scratch != null) UnityEngine.Object.Destroy(_scratch);
         _scratch = null; _failures = 0;
+        DecalShaders.Clear();
+    }
+
+    /// <summary>Whether the shader is an EFT decal shader; <c>Shader.name</c> allocates, so the answer is cached per instance.</summary>
+    private static bool IsDecalShader(Shader shader)
+    {
+        int id = shader.GetInstanceID();
+        if (!DecalShaders.TryGetValue(id, out bool isDecal))
+        {
+            isDecal = shader.name.IndexOf("_Decal", StringComparison.Ordinal) >= 0;
+            DecalShaders.Add(id, isDecal);
+        }
+        return isDecal;
     }
 }
 }

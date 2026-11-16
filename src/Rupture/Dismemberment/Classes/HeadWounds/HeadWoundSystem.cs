@@ -292,12 +292,12 @@ internal static partial class HeadWoundSystem
 
 	internal static void Update()
 	{
-		long started = Stopwatch.GetTimestamp(), chargedBefore = ProceduralCutFrameBudget.SpentTicks;
+		long started = Stopwatch.GetTimestamp(), chargedBefore = FrameWorkBudget.SpentTicks;
 		try { UpdateCore(); }
 		finally
 		{
-			long charged = ProceduralCutFrameBudget.SpentTicks - chargedBefore;
-			ProceduralCutFrameBudget.RecordStage(Stopwatch.GetTimestamp() - started - charged);
+			long charged = FrameWorkBudget.SpentTicks - chargedBefore;
+			FrameWorkBudget.RecordStage(Stopwatch.GetTimestamp() - started - charged);
 		}
 	}
 

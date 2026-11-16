@@ -42,12 +42,12 @@ public static class CasingRuntimeTests
         var manager = new CasingWorld();
         var world = new GameObject("world").AddComponent<EFT.GameWorld>();
         RuptureConfiguration.MaximumCasings.Value = 2;
-        EFT.AssetsManager.AmmoPoolObject Spawn(bool used, bool jam = false)
+        EFT.AssetsManager.AmmoPoolObject Spawn(bool used, bool jam = false, Vector3 at = default, object listener = null)
         {
-            var root = new GameObject("cartridge");
+            var root = new GameObject("cartridge"); root.transform.position = at;
             root.AddComponent<Rigidbody>().useGravity = false;
             var visual = root.AddComponent<EFT.AssetsManager.AmmoPoolObject>();
-            visual.Shell = root.AddComponent<EFT.Shell>();
+            visual.Shell = root.AddComponent<EFT.Shell>(); visual.Shell.CollisionListener = listener;
             // Names from the installed M855 bundle; EFT matches substrings,
             // not an exact transform named "shell" or "full".
             var shell = GameObject.CreatePrimitive(PrimitiveType.Cube); shell.name = "patron_556x45_m855_shell_LOD0";
@@ -137,6 +137,94 @@ public static class CasingRuntimeTests
         var afterFailure = Spawn(true);
         Check(backendFailed.Returns == 1 && manager.AllowReturn(afterFailure), "backend failure retires ownership and disables further raid admission");
         manager.Reset();
+        // Asynchronous environment path of a prefetch-capable backend: no synchronous capture while cells are ready or pending.
+        runtime.SyncCasingEnvironments = runtime.TryAcquires = 0;
+        var prefetched = Spawn(true); Tick();
+        Check(runtime.LastCreates == 1 && runtime.TryAcquires > 0 && runtime.SyncCasingEnvironments == 0,
+            "bound environment cells admit a casing without a synchronous capture");
+        runtime.AcquireState = ExternalEnvironmentPrefetchState.Pending;
+        var held = Spawn(true, false, new Vector3(50, 0, 0)); Tick();
+        Check(runtime.LastCreates == 0 && runtime.SyncCasingEnvironments == 0 && world._ammoShells.Contains(held) && manager.HasWork(),
+            "a pending urgent cell holds a new casing out of the native scene instead of capturing synchronously");
+        runtime.AcquireState = ExternalEnvironmentPrefetchState.Ready; Tick();
+        Check(runtime.LastCreates == 1 && runtime.SyncCasingEnvironments == 0, "a held casing is created once its environment is bound");
+        runtime.AcquireState = ExternalEnvironmentPrefetchState.Pending;
+        var expired = Spawn(true, false, new Vector3(100, 0, 0)); Tick();
+        Check(runtime.LastCreates == 0 && runtime.SyncCasingEnvironments == 0, "a casing is held while its environment stays pending");
+        System.Threading.Thread.Sleep(250); Tick();
+        Check(runtime.LastCreates == 1 && runtime.SyncCasingEnvironments > 0, "a casing held beyond the window captures its environment synchronously");
+        runtime.AcquireState = ExternalEnvironmentPrefetchState.Failed; runtime.SyncCasingEnvironments = 0;
+        var failedAsync = Spawn(true, false, new Vector3(150, 0, 0)); Tick();
+        Check(runtime.LastCreates == 1 && runtime.SyncCasingEnvironments > 0, "a failed asynchronous acquisition falls back to the synchronous capture");
+        runtime.AcquireState = ExternalEnvironmentPrefetchState.Ready; manager.Reset();
+        var target = Spawn(true); Tick(); Tick();
+        runtime.AcquireState = ExternalEnvironmentPrefetchState.Pending;
+        manager.Explosion(new FixtureExplosive(), new Vector3(2, 0, 0)); Tick();
+        Check(runtime.LastImpacts == 0 && manager.HasWork(), "a blast waits for pending occlusion geometry instead of passing through it");
+        runtime.AcquireState = ExternalEnvironmentPrefetchState.Ready; Tick();
+        Check(runtime.LastImpacts == 1, "a deferred blast is submitted once its occlusion geometry is bound");
+        manager.ReceiveCompleted(runtime);
+        int releasesBefore = runtime.EnvironmentReleases;
+        System.Threading.Thread.Sleep(1100); manager.HasWork();
+        Check(runtime.EnvironmentReleases > releasesBefore, "exposure cells are released after their retention even though the idle world takes no step");
+        Check(CasingWorld.UrgentSeconds(.15f) >= .15f && CasingWorld.UrgentSeconds(1f / 60f) >= .05f && CasingWorld.UrgentSeconds(.15f) >= .1f,
+            "the urgent coverage window spans a long frame's whole simulated step");
+        // Local player area prefetch.
+        manager.Reset();
+        runtime.AreaRequests = runtime.AreaCancels = 0;
+        var playerObject = new GameObject("player").AddComponent<EFT.Player>();
+        playerObject.Id = 7; playerObject.Position = new Vector3(3, 0, 4); playerObject.Velocity = new Vector3(2, 0, 0);
+        world.MainPlayer = playerObject; Comfort.Common.Singleton<EFT.GameWorld>.Instance = world;
+        manager.HasWork();
+        Check(runtime.AreaRequests == 1 && runtime.LastAreaConsumer == (0x8000_0000u | 7u) &&
+            Vector3.Distance(runtime.LastAreaCenter, new Vector3(3, 1, 4)) < .0001f && Vector3.Distance(runtime.LastAreaSweepEnd, new Vector3(5, 1, 4)) < .0001f,
+            "the local player's area prefetch uses the bot consumer formula and a corridor along their movement");
+        manager.HasWork();
+        Check(runtime.AreaRequests == 1, "the area prefetch is not re-requested inside its refresh interval");
+        playerObject.Position += new Vector3(2, 0, 0); System.Threading.Thread.Sleep(550); manager.HasWork();
+        Check(runtime.AreaRequests == 2, "the area prefetch refreshes after the player moved a metre");
+        manager.Reset();
+        Check(runtime.AreaCancels == 1, "raid reset cancels the area prefetch");
+        Comfort.Common.Singleton<EFT.GameWorld>.Instance = null;
+        // Contact audio: the local shooter flag, the per-frame cap and the pooled-source warm-up reach the audio boundary.
+        RuptureConfiguration.CasingSounds.Value = true; RuptureConfiguration.MaximumCasings.Value = 64;
+        var listenerObject = new GameObject("listener") { tag = "MainCamera" }; listenerObject.AddComponent<Camera>();
+        CasingAudio.WarmCalls = 0;
+        for (int i = 0; i < 5; i++) manager.HasWork();
+        Check(CasingAudio.WarmCalls == 3, "pooled audio sources are warmed one step per frame until the warm-up reports done");
+        // A warm-up that stops early returns its borrowed sources: the setting turned off, a backend failure, a raid reset.
+        manager.Reset(); CasingAudio.WarmCalls = 0; manager.HasWork();
+        Check(CasingAudio.HoldsSources, "a warm-up step keeps its borrowed source until the group is stocked");
+        int cancelsBefore = CasingAudio.Cancels;
+        RuptureConfiguration.CasingSounds.Value = false; manager.HasWork();
+        Check(CasingAudio.Cancels == cancelsBefore + 1 && !CasingAudio.HoldsSources, "turning casing sounds off mid warm-up returns the borrowed sources");
+        RuptureConfiguration.CasingSounds.Value = true; CasingAudio.WarmCalls = 0; manager.HasWork(); cancelsBefore = CasingAudio.Cancels;
+        manager.BackendFailed();
+        Check(CasingAudio.Cancels == cancelsBefore + 1 && !CasingAudio.HoldsSources, "a backend failure mid warm-up returns the borrowed sources");
+        manager.Reset(); CasingAudio.WarmCalls = 0; manager.HasWork(); cancelsBefore = CasingAudio.Cancels;
+        manager.Reset();
+        Check(CasingAudio.Cancels == cancelsBefore + 1 && !CasingAudio.HoldsSources, "raid reset returns borrowed warm-up sources");
+        ulong ShotId(bool local)
+        {
+            Spawn(true, false, Vector3.zero, local ? new LocalShellListener() : null); Tick();
+            ulong id = runtime.LastDescriptor.Id; manager.ReceiveCompleted(runtime); return id;
+        }
+        ulong remoteId = ShotId(false), localId = ShotId(true);
+        CasingAudio.Calls.Clear();
+        runtime.InjectContacts(new CasingContact { Id = remoteId, Position = Vector3.forward, Normal = Vector3.up, Speed = 1 },
+            new CasingContact { Id = localId, Position = Vector3.forward, Normal = Vector3.up, Speed = 2 });
+        manager.ReceiveCompleted(runtime);
+        Check(CasingAudio.Calls.Count == 2 && CasingAudio.Calls[0] == (localId, true) && CasingAudio.Calls[1] == (remoteId, false),
+            "contact sounds play loudest first and only a local player's casing skips occlusion");
+        runtime.InjectContacts(new CasingContact { Id = localId, Position = Vector3.forward, Normal = Vector3.up, Speed = 2 });
+        manager.ReceiveCompleted(runtime);
+        Check(CasingAudio.Calls.Count == 2, "a casing inside its sound cooldown does not play again");
+        var crowd = new CasingContact[14];
+        for (int i = 0; i < crowd.Length; i++) crowd[i] = new CasingContact { Id = ShotId(false), Position = Vector3.forward, Normal = Vector3.up, Speed = 1 };
+        CasingAudio.Calls.Clear();
+        runtime.InjectContacts(crowd); manager.ReceiveCompleted(runtime);
+        Check(CasingAudio.Calls.Count == 12, "one frame starts at most twelve contact sounds");
+        RuptureConfiguration.CasingSounds.Value = false; RuptureConfiguration.MaximumCasings.Value = 2;
         string report = Path.Combine(Directory.GetParent(Application.dataPath).FullName, "verification.json");
         File.WriteAllText(report, "{\"passed\":true,\"cases\":" + _checks + ",\"unityVersion\":\"" + Application.unityVersion + "\"}");
     }
@@ -144,11 +232,12 @@ public static class CasingRuntimeTests
 
 // EFT/backend boundary doubles. Production geometry, ownership and batch code run unchanged.
 namespace HarmonyLib { internal static class AccessTools { internal static FieldInfo Field(Type type, string name) => type.GetField(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance); } }
-namespace Comfort.Common { }
+namespace Comfort.Common { public static class Singleton<T> where T : class { public static T Instance; public static bool Instantiated => Instance != null; } }
 namespace EFT
 {
     public enum ECaliber { Shell9Mm, Shell556Mm, Shell12Cal, ShellHeavy }
-    public class GameWorld : MonoBehaviour { public List<AssetsManager.AmmoPoolObject> _ammoShells = new List<AssetsManager.AmmoPoolObject>(); }
+    public class GameWorld : MonoBehaviour { public List<AssetsManager.AmmoPoolObject> _ammoShells = new List<AssetsManager.AmmoPoolObject>(); public Player MainPlayer; }
+    public class Player : MonoBehaviour { public int Id; public Vector3 Position, Velocity; }
     public class Shell : MonoBehaviour
     {
         public ECaliber _caliber = ECaliber.Shell556Mm;
@@ -199,7 +288,21 @@ namespace Rupture
     public static class RupturePlugin { public static TestLog Log = new TestLog(); }
     public class TestLog { public void LogInfo(object message) { Debug.Log(message); } public void LogWarning(object message) { Debug.LogWarning(message); } public void LogError(object message) { Debug.LogError(message); } }
 }
-namespace Rupture.Casings { internal static class CasingAudio { internal static bool Play(CasingContact c, EFT.ECaliber caliber) => false; } }
+namespace Rupture.Casings
+{
+    public sealed class LocalShellListener { }
+    internal static class CasingAudio
+    {
+        internal static readonly List<(ulong Id, bool Local)> Calls = new List<(ulong Id, bool Local)>();
+        internal static int WarmCalls, Cancels;
+        internal static bool Play(CasingContact c, EFT.ECaliber caliber, bool localShooter) { Calls.Add((c.Id, localShooter)); return true; }
+        internal static bool IsLocalShooter(object listener) => listener is LocalShellListener;
+        internal static bool Holding;
+        internal static bool HoldsSources => Holding;
+        internal static bool WarmPool() { bool done = ++WarmCalls >= 3; Holding = !done; return done; }
+        internal static void CancelWarmup() { Cancels++; Holding = false; }
+    }
+}
 namespace Rupture.Ragdolls.Classes
 {
     internal static partial class ShadowRagdollWorld
@@ -220,12 +323,17 @@ namespace Rupture.Ragdolls.External
         void ReleaseEnvironment(uint id);
     }
 }
-internal sealed class CasingBackendFixture : IExternalPhysicsRuntime
+internal sealed class FixtureExplosive : EFT.IExplosiveItem { public bool IsDummy => false; public float MaxExplosionDistance => 5f; public float GetStrength => 10f; }
+internal sealed class CasingBackendFixture : IExternalPhysicsRuntime, IExternalEnvironmentPrefetchRuntime
 {
     public bool IsRaidReady => true;
     internal bool FailCreation, FailEnvironment;
     internal bool MainThreadObjectInCommands => Array.Exists(typeof(CasingDescriptor).GetFields(), f => typeof(UnityEngine.Object).IsAssignableFrom(f.FieldType));
     internal int LastCreates, LastRemoves, LastImpacts, EnvironmentAcquires, EnvironmentReleases;
+    internal int SyncCasingEnvironments, TryAcquires, AreaRequests, AreaCancels;
+    internal ExternalEnvironmentPrefetchState AcquireState = ExternalEnvironmentPrefetchState.Ready;
+    internal uint LastAreaConsumer;
+    internal Vector3 LastAreaCenter, LastAreaSweepEnd;
     internal CasingImpact LastImpact;
     internal CasingDescriptor LastDescriptor;
     private ExternalCasingFrame _queued, _completed;
@@ -234,6 +342,13 @@ internal sealed class CasingBackendFixture : IExternalPhysicsRuntime
     {
         if (_completed != null || _queued != null) throw new Exception("Fixture frame must be drained before injection");
         _completed = new ExternalCasingFrame();_completed.States[0]=state;_completed.StateCount=1;
+    }
+    internal void InjectContacts(params CasingContact[] contacts)
+    {
+        if (_completed != null || _queued != null) throw new Exception("Fixture frame must be drained before injection");
+        _completed = new ExternalCasingFrame();
+        for (int i = 0; i < contacts.Length; i++) _completed.Contacts[i] = contacts[i];
+        _completed.ContactCount = contacts.Length;
     }
     public void QueueCasingFrame(ExternalCasingFrame frame)
     {
@@ -255,7 +370,20 @@ internal sealed class CasingBackendFixture : IExternalPhysicsRuntime
         }
     }
     public bool EnsureEnvironment(uint id, Vector3 p, Vector3 e, out int result, out string failure) { EnvironmentAcquires++; result = 0; failure = null; return true; }
-    public bool EnsureCasingEnvironment(uint id, Vector3 p, Vector3 e, out string failure) { EnvironmentAcquires++; failure = FailEnvironment ? "unsupported fixture geometry" : null; return !FailEnvironment; }
+    public bool EnsureCasingEnvironment(uint id, Vector3 p, Vector3 e, out string failure) { EnvironmentAcquires++; SyncCasingEnvironments++; failure = FailEnvironment ? "unsupported fixture geometry" : null; return !FailEnvironment; }
     public void ReleaseEnvironment(uint id) { EnvironmentReleases++; }
+    public ExternalEnvironmentPrefetchState TryAcquireEnvironment(uint id, Vector3 center, Vector3 sweepEnd, bool casing)
+    {
+        TryAcquires++;
+        if (FailEnvironment) return ExternalEnvironmentPrefetchState.Failed;
+        if (AcquireState == ExternalEnvironmentPrefetchState.Ready) EnvironmentAcquires++;
+        return AcquireState;
+    }
+    public void RequestEnvironmentPrefetch(uint id, Vector3 center, Vector3 sweepEnd, float ttlSeconds)
+    { AreaRequests++; LastAreaConsumer = id; LastAreaCenter = center; LastAreaSweepEnd = sweepEnd; }
+    public ExternalEnvironmentPrefetchState GetEnvironmentPrefetchState(uint id) => AcquireState;
+    public double PumpEnvironmentPrefetch(double budgetMilliseconds) => 0d;
+    public void PromoteEnvironmentPrefetch(uint id, uint consumerId) { }
+    public void CancelEnvironmentPrefetch(uint id) { AreaCancels++; }
 }
 #endif
